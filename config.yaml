@@ -1,0 +1,23 @@
+# Configuration for qu3-app client
+
+# Default URL for the MCP server
+server_url: "http://127.0.0.1:8000"
+
+# Directory to store client and server keys
+# Use "~/.qu3/keys" for user-specific storage, or a relative path like "./keys"
+key_directory: "~/.qu3/keys"
+
+# Optional: Specify algorithms (should match server)
+# algorithms:
+#   kem: "Kyber-768"
+#   sig: "SPHINCS+-SHA256-128f-simple"
+
+# Optional: Connection timeouts (in seconds)
+# timeouts:
+#   connect: 10
+#   read: 30
+
+# Optional: Logging configuration
+# logging:
+#   level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+#   file: "/path/to/qu3_client.log" # Optional log file path 

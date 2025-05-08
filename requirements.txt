@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+typer[all]
+requests
+liboqs-python@git+https://github.com/open-quantum-safe/liboqs-python@main
+cryptography
+PyYAML
