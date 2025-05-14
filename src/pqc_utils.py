@@ -17,21 +17,21 @@ AES_KEY_BYTES = 32
 
 log = logging.getLogger(__name__)
 for algo_type, algo_name in ALGORITHMS.items():
-    if algo_type == "kem" and not oqs.Mechanism.is_kem_enabled(algo_name):
+    if algo_type == "kem" and not oqs.is_kem_enabled(algo_name):
         raise ImportError(f"Required KEM algorithm '{algo_name}' is not enabled in this liboqs build.")
-    elif algo_type == "sig" and not oqs.Mechanism.is_sig_enabled(algo_name):
+    elif algo_type == "sig" and not oqs.is_sig_enabled(algo_name):
         raise ImportError(f"Required Signature algorithm '{algo_name}' is not enabled in this liboqs build.")
     log.debug(f"PQC Algorithm Confirmed: {algo_type} = {algo_name}")
 
 def generate_key_pair(algo_name: str) -> tuple[bytes, bytes]:
     """Generates a public and private key pair for the specified PQC algorithm."""
-    if oqs.Mechanism.is_kem_enabled(algo_name):
+    if oqs.is_kem_enabled(algo_name):
         with oqs.KeyEncapsulation(algo_name) as kem:
             public_key = kem.generate_keypair()
             secret_key = kem.export_secret_key()
             log.info(f"Generated {algo_name} KEM key pair.")
             return public_key, secret_key
-    elif oqs.Mechanism.is_sig_enabled(algo_name):
+    elif oqs.is_sig_enabled(algo_name):
         with oqs.Signature(algo_name) as sig:
             public_key = sig.generate_keypair()
             secret_key = sig.export_secret_key()
@@ -42,7 +42,7 @@ def generate_key_pair(algo_name: str) -> tuple[bytes, bytes]:
 
 def sign_message(message: bytes, secret_key: bytes, sig_algo: str) -> bytes:
     """Signs a message using the provided private key and signature algorithm."""
-    if not oqs.Mechanism.is_sig_enabled(sig_algo):
+    if not oqs.is_sig_enabled(sig_algo):
         raise ValueError(f"Signature algorithm '{sig_algo}' is not enabled or supported.")
     with oqs.Signature(sig_algo, secret_key) as sig:
         signature = sig.sign(message)
@@ -51,7 +51,7 @@ def sign_message(message: bytes, secret_key: bytes, sig_algo: str) -> bytes:
 
 def verify_signature(message: bytes, signature: bytes, public_key: bytes, sig_algo: str) -> bool:
     """Verifies a signature against a message using the public key and signature algorithm."""
-    if not oqs.Mechanism.is_sig_enabled(sig_algo):
+    if not oqs.is_sig_enabled(sig_algo):
         raise ValueError(f"Signature algorithm '{sig_algo}' is not enabled or supported.")
     try:
         with oqs.Signature(sig_algo) as sig:
@@ -65,7 +65,7 @@ def verify_signature(message: bytes, signature: bytes, public_key: bytes, sig_al
 
 def kem_generate_keypair(kem_algo: str) -> tuple[bytes, bytes]:
     """Generates a KEM public and private key pair."""
-    if not oqs.Mechanism.is_kem_enabled(kem_algo):
+    if not oqs.is_kem_enabled(kem_algo):
         raise ValueError(f"KEM algorithm '{kem_algo}' is not enabled or supported.")
     with oqs.KeyEncapsulation(kem_algo) as kem:
         public_key = kem.generate_keypair()
@@ -79,7 +79,7 @@ def kem_encapsulate(kem_algo: str, public_key: bytes) -> tuple[bytes, bytes]:
     Returns:
         tuple[bytes, bytes]: The generated ciphertext and the shared secret.
     """
-    if not oqs.Mechanism.is_kem_enabled(kem_algo):
+    if not oqs.is_kem_enabled(kem_algo):
         raise ValueError(f"KEM algorithm '{kem_algo}' is not enabled or supported.")
     with oqs.KeyEncapsulation(kem_algo) as kem:
         ciphertext, shared_secret = kem.encap_secret(public_key)
@@ -92,7 +92,7 @@ def kem_decapsulate(kem_algo: str, ciphertext: bytes, secret_key: bytes) -> byte
     Returns:
         bytes: The derived shared secret.
     """
-    if not oqs.Mechanism.is_kem_enabled(kem_algo):
+    if not oqs.is_kem_enabled(kem_algo):
         raise ValueError(f"KEM algorithm '{kem_algo}' is not enabled or supported.")
     with oqs.KeyEncapsulation(kem_algo, secret_key) as kem:
         shared_secret = kem.decap_secret(ciphertext)

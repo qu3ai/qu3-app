@@ -207,7 +207,7 @@ class TestMCPClient(unittest.TestCase):
         
         attestation_data = {"serverVersion": "test-1.0", "modelId": "test_model", "status": "success"}
         attestation_bytes = json.dumps(attestation_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
-        server_attestation_sig = pqc_utils.sphincs_sign(self.server_sign_sk, attestation_bytes)
+        server_attestation_sig = pqc_utils.sign_message(attestation_bytes, self.server_sign_sk, pqc_utils.ALGORITHMS["sig"])
 
         response_cleartext_dict = {
             "status": "success",
@@ -218,7 +218,7 @@ class TestMCPClient(unittest.TestCase):
             "audit_hash": None
         }
         response_cleartext_bytes = json.dumps(response_cleartext_dict).encode('utf-8')
-        resp_nonce, resp_ciphertext = pqc_utils.aes_gcm_encrypt(session_aes_key, response_cleartext_bytes)
+        resp_nonce, resp_ciphertext = pqc_utils.encrypt_aes_gcm(session_aes_key, response_cleartext_bytes)
 
         mock_inference_response = MagicMock()
         mock_inference_response.status_code = 200
@@ -256,7 +256,7 @@ class TestMCPClient(unittest.TestCase):
         
         sent_nonce = base64.b64decode(sent_body['nonceB64'])
         sent_ciphertext = base64.b64decode(sent_body['encryptedPayloadB64'])
-        decrypted_sent_payload_bytes = pqc_utils.aes_gcm_decrypt(session_aes_key, sent_nonce, sent_ciphertext)
+        decrypted_sent_payload_bytes = pqc_utils.decrypt_aes_gcm(session_aes_key, sent_nonce, sent_ciphertext)
         decrypted_sent_payload_dict = json.loads(decrypted_sent_payload_bytes.decode('utf-8'))
 
         
@@ -299,7 +299,7 @@ class TestMCPClient(unittest.TestCase):
         
         wrong_sk, _ = pqc_utils.generate_key_pair(self.sig_algo)
         attestation_bytes = json.dumps(attestation_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
-        bad_server_attestation_sig = pqc_utils.sphincs_sign(wrong_sk, attestation_bytes)
+        bad_server_attestation_sig = pqc_utils.sign_message(attestation_bytes, wrong_sk, pqc_utils.ALGORITHMS["sig"])
 
         response_cleartext_dict = {
             "status": "success",
@@ -310,7 +310,7 @@ class TestMCPClient(unittest.TestCase):
             "audit_hash": None
         }
         response_cleartext_bytes = json.dumps(response_cleartext_dict).encode('utf-8')
-        resp_nonce, resp_ciphertext = pqc_utils.aes_gcm_encrypt(session_aes_key, response_cleartext_bytes)
+        resp_nonce, resp_ciphertext = pqc_utils.encrypt_aes_gcm(session_aes_key, response_cleartext_bytes)
 
         mock_inference_response = MagicMock()
         mock_inference_response.status_code = 200
@@ -344,7 +344,7 @@ class TestMCPClient(unittest.TestCase):
         
         attestation_data = {"serverVersion": "test-1.0", "modelId": "bad_model", "status": "error"}
         attestation_bytes = json.dumps(attestation_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
-        server_attestation_sig = pqc_utils.sphincs_sign(self.server_sign_sk, attestation_bytes)
+        server_attestation_sig = pqc_utils.sign_message(attestation_bytes, self.server_sign_sk, pqc_utils.ALGORITHMS["sig"])
 
         response_cleartext_dict = {
             "status": "error", 
@@ -355,7 +355,7 @@ class TestMCPClient(unittest.TestCase):
             "audit_hash": None
         }
         response_cleartext_bytes = json.dumps(response_cleartext_dict).encode('utf-8')
-        resp_nonce, resp_ciphertext = pqc_utils.aes_gcm_encrypt(session_aes_key, response_cleartext_bytes)
+        resp_nonce, resp_ciphertext = pqc_utils.encrypt_aes_gcm(session_aes_key, response_cleartext_bytes)
 
         mock_inference_response = MagicMock()
         mock_inference_response.status_code = 200 
@@ -386,7 +386,7 @@ class TestMCPClient(unittest.TestCase):
         
         response_cleartext_dict = {"status": "success", "output_data": "abc"}
         response_cleartext_bytes = json.dumps(response_cleartext_dict).encode('utf-8')
-        resp_nonce, resp_ciphertext = pqc_utils.aes_gcm_encrypt(session_aes_key, response_cleartext_bytes)
+        resp_nonce, resp_ciphertext = pqc_utils.encrypt_aes_gcm(session_aes_key, response_cleartext_bytes)
         
         tampered_ciphertext = resp_ciphertext[:-1] + bytes([(resp_ciphertext[-1] + 1) % 256])
 

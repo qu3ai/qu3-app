@@ -553,7 +553,8 @@ def update_policy(policy_file: str, server_url: str | None):
 
         try:
             
-            decrypted_response_payload_bytes = mcp_client.decrypt_payload(resp_nonce_bytes, resp_ciphertext_bytes)
+            decrypted_response_payload_bytes = mcp_client.decrypt_aes_gcm(resp_nonce_bytes, resp_ciphertext_bytes)
+            
             log.debug("Server response decrypted.")
             
             server_status_message_str = decrypted_response_payload_bytes.decode('utf-8')
