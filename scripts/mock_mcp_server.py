@@ -18,8 +18,6 @@ sys.path.insert(0, Path(__file__).parent.parent.resolve().__str__())
 from src.mcp_client import MCPRequest as MCPRequestSchema, MCPResponse as MCPResponseSchema 
 from src.pqc_utils import (
     generate_key_pair,
-    load_public_key,
-    load_key_pair,
     sign_message,
     verify_signature,
     ALGORITHMS,
@@ -70,6 +68,10 @@ def initialize_server_keys():
         server_kem_pk, server_kem_sk = generate_key_pair(SERVER_KEM_ALGO)
         save_key_pair_to_files(server_kem_pk, server_kem_sk, *server_kem_key_pair_files)
         print(f"Server KEM keys generated and saved to {KEY_DIR}")
+    except Exception as e:
+        print(f"CRITICAL: Error initializing server KEM keys: {e}")
+        server_kem_pk, server_kem_sk = None, None
+
 
     
     try:
@@ -80,6 +82,9 @@ def initialize_server_keys():
         server_sign_pk, server_sign_sk = generate_key_pair(SERVER_SIGN_ALGO)
         save_key_pair_to_files(server_sign_pk, server_sign_sk, *server_sign_key_pair_files)
         print(f"Server Signing keys generated and saved to {KEY_DIR}")
+    except Exception as e:
+        print(f"CRITICAL: Error initializing server signing keys: {e}")
+        server_sign_pk, server_sign_sk = None, None
 
     
     try:
@@ -151,7 +156,7 @@ def handle_kem_handshake(request: KEMHandshakeRequest):
 
         ciphertext_b64 = base64.b64encode(ciphertext).decode('utf-8')
 
-        return KEMHandshakeResponse(kem_ciphertext_b64=ciphertext_b64)
+        return {"kemCiphertextB64": ciphertext_b64}
 
     except (base64.binascii.Error, ValueError) as e:
         log.error(f"Failed to decode client KEM public key: {e}")
@@ -168,7 +173,7 @@ def handle_kem_handshake(request: KEMHandshakeRequest):
 @app.post("/inference", response_model=EncryptedResponse)
 def run_inference_secure(request: EncryptedRequest):
     """Handles encrypted and signed inference requests."""
-    client_id_b64 = request.clientKemPublicKeyB64 
+    client_id_b64 = request.client_kem_public_key_b64 
     log.info(f"Received /inference request from client ID: {client_id_b64[:10]}...")
 
     
@@ -195,8 +200,8 @@ def run_inference_secure(request: EncryptedRequest):
 
     
     try:
-        nonce = base64.b64decode(request.nonceB64)
-        encrypted_payload = base64.b64decode(request.encryptedPayloadB64)
+        nonce = base64.b64decode(request.nonce_b64)
+        encrypted_payload = base64.b64decode(request.encrypted_payload_b64)
 
         
         decrypted_payload_bytes = decrypt_aes_gcm(session_key, nonce, encrypted_payload)
@@ -248,30 +253,56 @@ def run_inference_secure(request: EncryptedRequest):
         raise HTTPException(status_code=500, detail="Signature verification failed")
     
     model_id = request_payload_dict.get("model_id")
-    input_data = request_payload_dict.get("input_data", {})
+    raw_input_data = request_payload_dict.get("input_data", {})
     log.info(f"Processing inference for model '{model_id}'...")
 
     output_data: Any = None
     error_message: Optional[str] = None
     status = "success"
 
-    if model_id == "model_caps":
-        text = input_data.get("text")
-        if isinstance(text, str):
-            output_data = {"capitalized_text": text.upper()}
-        else:
+    processed_input_data = {}
+    if isinstance(raw_input_data, str):
+        try:
+            parsed_data = json.loads(raw_input_data)
+            if isinstance(parsed_data, dict):
+                processed_input_data = parsed_data
+            else:
+                status = "error"
+                error_message = "Invalid input_data: content of JSON string is not an object."
+                log.warning(f"input_data string parsed, but not to a dict: {raw_input_data}")
+        except json.JSONDecodeError as e:
             status = "error"
-            error_message = "Invalid input: 'text' field must be a string for model_caps."
-    elif model_id == "model_reverse":
-        text = input_data.get("text")
-        if isinstance(text, str):
-            output_data = {"reversed_text": text[::-1]}
-        else:
-            status = "error"
-            error_message = "Invalid input: 'text' field must be a string for model_reverse."
+            error_message = f"Invalid input_data: failed to parse JSON string. ({e})"
+            log.warning(f"Failed to parse input_data string '{raw_input_data}': {e}")
+    elif isinstance(raw_input_data, dict):
+        processed_input_data = raw_input_data
     else:
         status = "error"
-        error_message = f"Unknown model ID: '{model_id}'"
+        error_message = "Invalid input_data type: expected JSON object or JSON string."
+        log.warning(f"input_data is of unexpected type: {type(raw_input_data)}. Value: {raw_input_data}")
+
+    if status == "success":
+        if model_id == "model_caps":
+            text = processed_input_data.get("text")
+            if isinstance(text, str):
+                output_data = {"capitalized_text": text.upper()}
+            else:
+                status = "error"
+                error_message = ("Invalid input for model_caps: 'text' field must be a string "
+                                 "and present in input_data.")
+                log.warning(f"model_caps: 'text' is not a string or missing. input_data: {processed_input_data}")
+        elif model_id == "model_reverse":
+            text = processed_input_data.get("text")
+            if isinstance(text, str):
+                output_data = {"reversed_text": text[::-1]}
+            else:
+                status = "error"
+                error_message = ("Invalid input for model_reverse: 'text' field must be a string "
+                                 "and present in input_data.")
+                log.warning(f"model_reverse: 'text' is not a string or missing. input_data: {processed_input_data}")
+        else:
+            status = "error"
+            error_message = f"Unknown model ID: '{model_id}'"
 
     log.info(f"Inference result - Status: {status}, Output Keys: {list(output_data.keys()) if isinstance(output_data, dict) else type(output_data)}")
 
@@ -280,20 +311,31 @@ def run_inference_secure(request: EncryptedRequest):
         "serverVersion": "mock-0.1.0",
         "modelId": model_id,
         "status": status,
-        "inputHash": base64.b64encode(json.dumps(input_data, sort_keys=True).encode()).decode(), 
+        "inputHash": base64.b64encode(json.dumps(raw_input_data, sort_keys=True).encode()).decode(),
         "outputHash": base64.b64encode(json.dumps(output_data, sort_keys=True).encode()).decode(), 
         "timestamp": datetime.now(timezone.utc).isoformat() 
     }
 
     
+    log.debug(f"Attempting to sign attestation. Server sign SK is {'set' if server_sign_sk else 'None'}. Algorithm: {SERVER_SIGN_ALGO}")
     try:
         attestation_string = json.dumps(attestation_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
         attestation_signature_bytes = sign_message(attestation_string, server_sign_sk, SERVER_SIGN_ALGO)
-        log.debug("Server attestation data signed successfully.")
+        
+        log.debug(f"Raw attestation_signature_bytes (len: {len(attestation_signature_bytes) if attestation_signature_bytes else 'None'}): {attestation_signature_bytes.hex()[:32] if attestation_signature_bytes else 'None'}...")
+
+        if not attestation_signature_bytes:
+            log.error("sign_message returned None or empty bytes, but no exception was raised.")
+            attestation_signature_bytes = None 
+            error_message = error_message or "Failed to generate server attestation signature (sign_message returned empty)."
+            status = "error"
+        else:
+            log.debug("Server attestation data signed successfully.")
+
     except Exception as e:
         log.exception(f"Failed to sign server attestation: {e}")
         attestation_signature_bytes = None
-        error_message = error_message or "Failed to generate server attestation signature."
+        error_message = error_message or "Failed to generate server attestation signature (exception during sign_message)."
         status = "error"
 
     
@@ -313,11 +355,10 @@ def run_inference_secure(request: EncryptedRequest):
         resp_nonce, resp_ciphertext = encrypt_aes_gcm(session_key, response_payload_json)
         log.debug("Response payload encrypted successfully.")
 
-        
-        return EncryptedResponse(
-            nonceB64=base64.b64encode(resp_nonce).decode('utf-8'),
-            encryptedPayloadB64=base64.b64encode(resp_ciphertext).decode('utf-8')
-        )
+        return {
+            "nonceB64": base64.b64encode(resp_nonce).decode('utf-8'),
+            "encryptedPayloadB64": base64.b64encode(resp_ciphertext).decode('utf-8')
+        }
     except Exception as e:
         log.exception(f"Failed to encrypt response payload: {e}")
         raise HTTPException(status_code=500, detail="Failed to encrypt server response")
@@ -443,7 +484,6 @@ def get_server_public_keys():
 
 
 if __name__ == "__main__":
-    
-    log.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG)
     print("Starting MCP Development Server...")
     uvicorn.run(app, host="127.0.0.1", port=8000) 

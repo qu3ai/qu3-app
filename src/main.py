@@ -5,20 +5,20 @@ import typer
 import json
 import os
 import sys
-from typing import Optional
+from typing import Optional, Any, Dict
 from pathlib import Path
 import base64
 import requests
 from cryptography.exceptions import InvalidSignature, InvalidTag
 
 from .mcp_client import MCPClient, MCPRequest, MCPResponse
-from .pqc_utils import generate_key_pair, load_public_key, load_key_pair, ALGORITHMS
+from .pqc_utils import generate_key_pair, ALGORITHMS, sign_message, verify_signature, decrypt_aes_gcm
 from .config_utils import (
     save_key_pair_to_files,
     load_key_pair_from_files,
     get_key_dir,
+    load_public_key_from_file,
     DEFAULT_SERVER_URL,
-    DEFAULT_KEY_DIR,
     ensure_key_dir_exists,
     load_config,
     get_server_url,
@@ -43,7 +43,19 @@ client_sign_key_pair_files = (
     get_key_dir() / "client_sign.sec",
 )
 
+logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger(__name__)
+
+def _get_key_paths(key_dir_path: Path) -> Dict[str, Any]:
+    """Helper to define all key file paths based on a key directory."""
+    return {
+        "server_kem_pub": key_dir_path / "server_kem.pub",
+        "server_sign_pub": key_dir_path / "server_sign.pub",
+        "client_kem_pub": key_dir_path / "client_kem.pub",
+        "client_kem_sec": key_dir_path / "client_kem.sec",
+        "client_sign_pub": key_dir_path / "client_sign.pub",
+        "client_sign_sec": key_dir_path / "client_sign.sec",
+    }
 
 def initialize_client(config: dict, server_url_override: Optional[str] = None) -> Optional[dict]:
     """Initializes the MCPClient state, handling key loading/generation and server key fetching.
@@ -58,27 +70,24 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
     """
     log.info("Initializing MCP Client State...")
 
-    key_dir = get_key_dir(config)
+    key_dir = get_key_dir()
     ensure_key_dir_exists(key_dir)
 
-    server_url = server_url_override or get_server_url(config)
-    if not server_url:
+    resolved_server_url = server_url_override or get_server_url()
+    if not resolved_server_url:
         log.error("MCP Server URL is not configured and not provided.")
         print("Error: Server URL missing in config.yaml and --server-url option.")
         return None
 
     log.info(f"Using Key Directory: {key_dir}")
-    log.info(f"Target Server URL: {server_url}")
+    log.info(f"Target Server URL: {resolved_server_url}")
 
-    server_kem_pub_file = key_dir / "server_kem.pub"
-    server_sign_pub_file = key_dir / "server_sign.pub"
-    client_kem_pub_file, client_kem_sec_file = key_dir / "client_kem.pub", key_dir / "client_kem.sec"
-    client_sign_pub_file, client_sign_sec_file = key_dir / "client_sign.pub", key_dir / "client_sign.sec"
+    paths = _get_key_paths(key_dir)
 
     try:
         log.debug("Attempting to load client KEM keys...")
         client_kem_pk_bytes, client_kem_sk_bytes = load_key_pair_from_files(
-            client_kem_pub_file, client_kem_sec_file
+            paths["client_kem_pub"], paths["client_kem_sec"]
         )
         log.info(f"Client KEM keys loaded from {key_dir}")
     except FileNotFoundError:
@@ -86,7 +95,7 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
         try:
             client_kem_pk_bytes, client_kem_sk_bytes = generate_key_pair(client_kem_algo)
             save_key_pair_to_files(
-                client_kem_pk_bytes, client_kem_sk_bytes, client_kem_pub_file, client_kem_sec_file
+                client_kem_pk_bytes, client_kem_sk_bytes, paths["client_kem_pub"], paths["client_kem_sec"]
             )
             log.info(f"Client KEM keys generated and saved to {key_dir}")
         except (pqc_utils.PQCError, IOError) as e:
@@ -101,7 +110,7 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
     try:
         log.debug("Attempting to load client signing keys...")
         client_sign_pk_bytes, client_sign_sk_bytes = load_key_pair_from_files(
-            client_sign_pub_file, client_sign_sec_file
+            paths["client_sign_pub"], paths["client_sign_sec"]
         )
         log.info(f"Client signing keys loaded from {key_dir}")
     except FileNotFoundError:
@@ -109,7 +118,7 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
         try:
             client_sign_pk_bytes, client_sign_sk_bytes = generate_key_pair(client_sign_algo)
             save_key_pair_to_files(
-                client_sign_pk_bytes, client_sign_sk_bytes, client_sign_pub_file, client_sign_sec_file
+                client_sign_pk_bytes, client_sign_sk_bytes, paths["client_sign_pub"], paths["client_sign_sec"]
             )
             log.info(f"Client signing keys generated and saved to {key_dir}")
         except (pqc_utils.PQCError, IOError) as e:
@@ -123,26 +132,26 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
 
     try:
         log.debug("Attempting to load server public keys...")
-        server_kem_pk_bytes = load_public_key(server_kem_pub_file)
-        server_sign_pk_bytes = load_public_key(server_sign_pub_file)
+        server_kem_pk_bytes = load_public_key_from_file(paths["server_kem_pub"])
+        server_sign_pk_bytes = load_public_key_from_file(paths["server_sign_pub"])
         log.info(f"Server public keys loaded from {key_dir}")
     except FileNotFoundError:
         log.warning(
-            f"Server public keys ({server_kem_pub_file.name}, {server_sign_pub_file.name}) "
+            f"Server public keys ({paths['server_kem_pub'].name}, {paths['server_sign_pub'].name}) "
             f"not found locally in {key_dir}. Attempting to fetch from server..."
         )
-        if fetch_and_save_server_keys(server_url, key_dir, server_kem_pub_file.name, server_sign_pub_file.name):
+        if fetch_and_save_server_keys(resolved_server_url, key_dir, paths["server_kem_pub"].name, paths["server_sign_pub"].name):
             log.info("Successfully fetched and saved server public keys.")
             try:
-                server_kem_pk_bytes = load_public_key(server_kem_pub_file)
-                server_sign_pk_bytes = load_public_key(server_sign_pub_file)
+                server_kem_pk_bytes = load_public_key_from_file(paths["server_kem_pub"])
+                server_sign_pk_bytes = load_public_key_from_file(paths["server_sign_pub"])
             except (IOError, pqc_utils.PQCError) as e:
                  log.exception(f"Failed to load server keys even after fetching: {e}")
                  print(f"Error: Failed to load server keys after fetching: {e}")
                  return None
         else:
             log.error("Failed to fetch server public keys from the server.")
-            print(f"Error: Could not find server keys locally or fetch them from {server_url}/keys.")
+            print(f"Error: Could not find server keys locally or fetch them from {resolved_server_url}/keys.")
             print("Please ensure the server is running and keys are available, or place them manually.")
             return None
     except (IOError, pqc_utils.PQCError) as e:
@@ -153,7 +162,7 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
     try:
         log.debug("Initializing MCPClient instance...")
         client = MCPClient(
-            server_url=server_url, # Pass the definitive server URL
+            server_url=resolved_server_url,
             client_kem_key_pair=(client_kem_pk_bytes, client_kem_sk_bytes),
             client_sign_key_pair=(client_sign_pk_bytes, client_sign_sk_bytes),
             server_kem_public_key=server_kem_pk_bytes,
@@ -163,9 +172,9 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
 
         return {
             "client": client,
-            "kem_pk_bytes": client_kem_pk_bytes,
-            "sign_sk_bytes": client_sign_sk_bytes,
-            "server_url": server_url
+            "client_kem_pk_bytes": client_kem_pk_bytes,
+            "client_sign_sk_bytes": client_sign_sk_bytes,
+            "server_url": resolved_server_url
         }
 
     except ValueError as e:
@@ -193,7 +202,7 @@ def run_inference(
     verifies the server's attestation, and displays the result.
     """
     typer.echo(f"--- QU3 Client: Running Inference --- ")
-    typer.echo(f"Using key directory: {DEFAULT_KEY_DIR}")
+    typer.echo(f"Using key directory: {get_key_dir()}")
     
 
     typer.echo(f"Target Server: {server_url}")
@@ -214,7 +223,7 @@ def run_inference(
             raise typer.Exit(code=1)
 
         request = MCPRequest(
-            target_server_url=client_state["server_url"], # Use the resolved URL
+            target_server_url=client_state["server_url"],
             model_id=model_id,
             input_data=input_data,
         )
@@ -229,9 +238,8 @@ def run_inference(
          typer.secho(f"Fatal: Unexpected error initializing MCP Client: {e}", fg=typer.colors.RED)
          raise typer.Exit(code=1)
     finally:
-        # Ensure disconnection if clent was initialized
         if client_state and client_state.get("client"):
-            typer.echo("Disconnecting client...") # Added user feedback
+            typer.echo("Disconnecting client...")
             client_state["client"].disconnect()
             typer.echo("Client disconnected.")
 
@@ -258,7 +266,7 @@ def run_inference(
             verification_failed = fg_color == typer.colors.YELLOW
             status = "(Verification FAILED)" if verification_failed else "(Verification OK)"
             sig_color = typer.colors.RED if verification_failed else typer.colors.GREEN
-            typer.echo(f"Attestation Signature: {sig_hex[:20]}... {status}", fg=sig_color)
+            typer.echo(f"Attestation Signature: {sig_hex[:20]}... {status}", color=sig_color)
         if response.audit_hash:
             typer.echo(f"Audit Hash: {response.audit_hash}")
     else:
@@ -352,7 +360,6 @@ def run_agent(
         client = client_state["client"]
         resolved_server_url = client_state["server_url"]
 
-        # Connect (KEM Handshake)
         if not client.connect(resolved_server_url):
             typer.secho(f"Failed to establish secure connection with server {resolved_server_url}. KEM handshake failed?", fg=typer.colors.RED)
             raise typer.Exit(code=1)
@@ -437,7 +444,24 @@ def run_agent(
                     typer.secho("Workflow execution aborted.", fg=typer.colors.RED)
                     raise typer.Exit(code=1)
                 
-                current_input_dict = response.output_data
+                next_model_id = steps[i+1]
+                transformed_input = response.output_data
+                if next_model_id in ["model_caps", "model_reverse"]:
+                    log.debug(f"Next model '{next_model_id}' requires specific 'text' input. Attempting transformation.")
+                    if isinstance(response.output_data, dict) and len(response.output_data) == 1:
+                        key, value = list(response.output_data.items())[0]
+                        if isinstance(value, str):
+                            transformed_input = {"text": value}
+                            log.info(f"Transformed input for '{next_model_id}': mapped '{key}' to 'text'.")
+                        else:
+                            log.warning(f"Output from '{model_id}' is a dict with one key, but value is not a string. Cannot auto-transform for '{next_model_id}'. Passing raw output.")
+                    elif isinstance(response.output_data, str):
+                        transformed_input = {"text": response.output_data}
+                        log.info(f"Transformed input for '{next_model_id}': used raw string output from '{model_id}' as 'text'.")
+                    else:
+                        log.warning(f"Output from '{model_id}' is not a single-entry dict or a string. Cannot auto-transform for '{next_model_id}'. Passing raw output: {response.output_data}")
+                
+                current_input_dict = transformed_input
             else:
                 
                 final_output = response.output_data
@@ -487,8 +511,8 @@ def update_policy(policy_file: str, server_url: str | None):
             return
 
         mcp_client = client_state["client"]
-        client_sign_sk_bytes = client_state["sign_sk_bytes"]
-        client_kem_pk_bytes = client_state["kem_pk_bytes"]
+        client_sign_sk_bytes = client_state["client_sign_sk_bytes"]
+        client_kem_pk_bytes = client_state["client_kem_pk_bytes"]
         resolved_server_url = client_state["server_url"]
 
         with open(policy_file, 'r') as f:
@@ -504,7 +528,7 @@ def update_policy(policy_file: str, server_url: str | None):
 
         
         log.debug("Signing policy content...")
-        policy_signature_bytes = pqc_utils.sign_message(policy_bytes, client_sign_sk_bytes, client_sign_algo)
+        policy_signature_bytes = sign_message(policy_bytes, client_sign_sk_bytes, client_sign_algo)
         log.debug(f"Policy signature (first 10 bytes): {policy_signature_bytes[:10].hex()}...")
 
         
@@ -522,7 +546,7 @@ def update_policy(policy_file: str, server_url: str | None):
             "signature_b64": base64.b64encode(policy_signature_bytes).decode('utf-8')
         }
 
-        policy_endpoint = urljoin(resolved_server_url.rstrip('/') + '/', "policy-update") # Use resolved URL
+        policy_endpoint = urljoin(resolved_server_url.rstrip('/') + '/', "policy-update")
         log.info(f"Sending policy update to {policy_endpoint}")
         print(f"Sending policy update ({len(policy_bytes)} bytes) to {policy_endpoint}...")
 
@@ -553,9 +577,9 @@ def update_policy(policy_file: str, server_url: str | None):
 
         try:
             
-            decrypted_response_payload_bytes = mcp_client.decrypt_aes_gcm(resp_nonce_bytes, resp_ciphertext_bytes)
+            decrypted_response_payload_bytes = decrypt_aes_gcm(mcp_client.session_key, resp_nonce_bytes, resp_ciphertext_bytes)
             
-            log.debug("Server response decrypted.")
+            log.debug("Server response for policy update decrypted.")
             
             server_status_message_str = decrypted_response_payload_bytes.decode('utf-8')
             log.info(f"Decrypted server status message: {server_status_message_str}")
@@ -566,10 +590,16 @@ def update_policy(policy_file: str, server_url: str | None):
                  print("Error: Cannot verify server response (missing server public key).")
                  return
 
-            log.debug("Verifying server signature...")
-            pqc_utils.verify_signature(decrypted_response_payload_bytes, resp_signature_bytes, server_sign_pk_bytes, client_sign_algo)
-            log.info("Server response signature VERIFIED successfully.")
-            print(f"Server response signature VERIFIED.")
+            log.debug("Verifying server signature on policy update response...")
+            is_server_sig_valid = verify_signature(
+                decrypted_response_payload_bytes, 
+                resp_signature_bytes, 
+                server_sign_pk_bytes, 
+                ALGORITHMS["sig"]
+            )
+            if is_server_sig_valid:
+                log.info("Server response signature VERIFIED successfully.")
+                print(f"Server response signature VERIFIED.")
 
             
             try:
