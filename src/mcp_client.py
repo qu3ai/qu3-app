@@ -12,7 +12,7 @@ from cryptography.exceptions import InvalidTag, InvalidSignature
 
 from .pqc_utils import (
     KEM_ALG, SIG_ALG,
-    sphincs_sign,
+    sign_message,
     verify_signature,
     kem_decapsulate,
     ALGORITHMS,
@@ -224,7 +224,7 @@ class MCPClient:
         
         try:
             self.log.debug(f"Signing payload with {ALGORITHMS['sig']}...")
-            signature_bytes = sphincs_sign(self._client_sign_keys[1], payload_bytes_to_sign)
+            signature_bytes = sign_message(payload_bytes_to_sign, self._client_sign_keys[1], ALGORITHMS["sig"])
             self.log.debug(f"Signature generated ({len(signature_bytes)} bytes).")
         except PQCError as e:
             self.log.exception(f"PQC signing failed: {e}")
@@ -318,6 +318,32 @@ class MCPClient:
              self.log.info("Server attestation signature VERIFIED.")
 
         return server_response
+
+    def encrypt_payload(self, payload_bytes: bytes) -> Tuple[bytes, bytes]:
+        """Encrypts the given payload using the current session key.
+
+        Args:
+            payload_bytes: The bytes to encrypt.
+
+        Returns:
+            Tuple[bytes, bytes]: The nonce and the ciphertext.
+
+        Raises:
+            RuntimeError: If no active session key is available (client not connected).
+            PQCError: If AES-GCM encryption fails.
+        """
+        if not self._session_key:
+            self.log.error("Cannot encrypt payload: No active session key. Call connect() first.")
+            raise RuntimeError("Cannot encrypt payload: No active session key. Client must be connected.")
+
+        self.log.debug(f"Encrypting payload of length {len(payload_bytes)} bytes with AES-GCM using session key...")
+        try:
+            nonce, ciphertext = encrypt_aes_gcm(self._session_key, payload_bytes)
+            self.log.debug(f"Payload encryption successful. Nonce: {nonce.hex()[:16]}..., Ciphertext: {ciphertext.hex()[:16]}...")
+            return nonce, ciphertext
+        except Exception as e:
+            self.log.exception(f"AES-GCM encryption failed during encrypt_payload: {e}")
+            raise RuntimeError(f"Payload encryption failed: {e}")
 
     def disconnect(self):
         if not self._is_connected:
