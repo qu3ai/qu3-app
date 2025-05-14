@@ -4,22 +4,23 @@ import base64
 import os
 import requests
 import json
-import oqs 
-import sys 
 import logging
 from pathlib import Path
-from cryptography.exceptions import InvalidTag, InvalidSignature 
+from cryptography.exceptions import InvalidTag
 
 from .pqc_utils import (
-    KEM_ALG, SIG_ALG,
+    ALGORITHMS,
     sign_message,
     verify_signature,
     kem_decapsulate,
-    ALGORITHMS,
     encrypt_aes_gcm,
     decrypt_aes_gcm,
     derive_aes_key,
-    PQCError
+    PQCError,
+    POCKEMError,
+    PQCSignatureError,
+    PQCEncryptionError,
+    PQCDecryptionError
 )
 
 @dataclass
@@ -54,13 +55,21 @@ class MCPResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'MCPResponse':
+        raw_signature_b64 = data.get('attestation_signature_b64')
+        # Temporary debug log
+        logger = logging.getLogger(__name__)
+        logger.debug(f"MCPResponse.from_dict: Raw attestation_signature_b64 from dict: {'PRESENT and NON-EMPTY' if raw_signature_b64 else ('PRESENT BUT EMPTY/NONE' if raw_signature_b64 == '' or raw_signature_b64 is None else 'MISSING')}")
+        if raw_signature_b64 and len(raw_signature_b64) > 20:
+             logger.debug(f"MCPResponse.from_dict: att_sig_b64 (first 20 chars): {raw_signature_b64[:20]}...")
+
+
         return cls(
-            status=data.get('status', 'error'), 
-            output_data=data.get('outputData'), 
-            error_message=data.get('errorMessage'),
-            attestation_data=data.get('attestationData'),
-            attestation_signature=base64.b64decode(data['attestationSignature']) if data.get('attestationSignature') else None,
-            audit_hash=data.get('auditHash')
+            status=data.get('status', 'error'),
+            output_data=data.get('output_data'),
+            error_message=data.get('error_message'),
+            attestation_data=data.get('attestation_data'),
+            attestation_signature=base64.b64decode(raw_signature_b64) if raw_signature_b64 else None,
+            audit_hash=data.get('audit_hash')
         )
 
 
@@ -109,10 +118,10 @@ class MCPClient:
         ]):
             raise ValueError("Missing required arguments for MCPClient initialization (URL or Keys).")
 
-        self._client_kem_keys = client_kem_key_pair
-        self._client_sign_keys = client_sign_key_pair
-        self._server_kem_pubkey = server_kem_public_key
-        self._server_sign_pubkey = server_sign_public_key
+        self.client_kem_pk_bytes, self.client_kem_sk_bytes = client_kem_key_pair
+        self.client_sign_pk_bytes, self.client_sign_sk_bytes = client_sign_key_pair
+        self.server_kem_pk_bytes = server_kem_public_key
+        self.server_sign_pk_bytes = server_sign_public_key
 
         self._session_key: Optional[bytes] = None 
         self._is_connected = False
@@ -139,25 +148,26 @@ class MCPClient:
                 self.log.warning(f"Client already connected to {self._connected_server_url}, disconnecting before connecting to {server_url}.")
                 self.disconnect()
 
-        if not self._client_kem_keys:
-             self.log.error("Connection failed: Client KEM keys are not loaded.")
+        if not self.client_kem_pk_bytes or not self.client_kem_sk_bytes or not self.client_sign_pk_bytes:
+             self.log.error("Connection failed: Client KEM or Signing public keys are not loaded.")
              return False
 
-        self.log.info(f"Initiating connection and KEM ({KEM_ALG}) handshake with {server_url}...")
-        client_kem_pubkey, client_kem_secretkey = self._client_kem_keys
+        self.log.info(f"Initiating connection and KEM ({ALGORITHMS['kem']}) handshake with {server_url}...")
 
-        
         handshake_endpoint = f"{server_url.rstrip('/')}/kem-handshake/initiate"
         try:
+            client_kem_pk_b64 = base64.b64encode(self.client_kem_pk_bytes).decode('utf-8')
+            client_sign_pk_b64 = base64.b64encode(self.client_sign_pk_bytes).decode('utf-8')
             
-            client_pk_b64 = base64.b64encode(client_kem_pubkey).decode('utf-8')
-            request_payload = {"clientKemPublicKeyB64": client_pk_b64}
-            self.log.debug(f"Sending client KEM public key to {handshake_endpoint}...")
+            request_payload = {
+                "client_kem_pub_key_b64": client_kem_pk_b64,
+                "client_sign_pub_key_b64": client_sign_pk_b64
+            }
+            self.log.debug(f"Sending client KEM & Signing public keys to {handshake_endpoint}...")
 
             http_response = self._http_session.post(handshake_endpoint, json=request_payload, timeout=15)
             http_response.raise_for_status() 
 
-            
             response_data = http_response.json()
             ciphertext_b64 = response_data.get("kemCiphertextB64")
             if not ciphertext_b64:
@@ -167,9 +177,7 @@ class MCPClient:
             ciphertext = base64.b64decode(ciphertext_b64)
             self.log.debug(f"Received KEM ciphertext (length: {len(ciphertext)} bytes) from server.")
 
-            
-            kem_shared_secret = kem_decapsulate(KEM_ALG, ciphertext, client_kem_secretkey)
-
+            kem_shared_secret = kem_decapsulate(ALGORITHMS['kem'], ciphertext, self.client_kem_sk_bytes)
             
             self._session_key = derive_aes_key(kem_shared_secret)
             self.log.info(f"Successfully derived AES session key (length: {len(self._session_key)} bytes). Secure session established.")
@@ -180,15 +188,13 @@ class MCPClient:
         except (json.JSONDecodeError, TypeError, ValueError, base64.binascii.Error) as e:
             self.log.exception(f"Failed to decode or parse server handshake response: {e}")
             return False
-        except oqs.OpenSSLError as e:
-            
-            self.log.exception(f"PQC KEM decapsulation failed: {e}")
+        except POCKEMError as e:
+            self.log.exception(f"PQC KEM operation failed during handshake: {e}")
             return False
         except Exception as e:
             self.log.exception(f"Unexpected error during KEM handshake: {e}")
             return False
 
-        
         self._connected_server_url = server_url
         self._is_connected = True
         self.log.info(f"Connection to {self._connected_server_url} successful.")
@@ -224,9 +230,9 @@ class MCPClient:
         
         try:
             self.log.debug(f"Signing payload with {ALGORITHMS['sig']}...")
-            signature_bytes = sign_message(payload_bytes_to_sign, self._client_sign_keys[1], ALGORITHMS["sig"])
+            signature_bytes = sign_message(payload_bytes_to_sign, self.client_sign_sk_bytes, ALGORITHMS["sig"])
             self.log.debug(f"Signature generated ({len(signature_bytes)} bytes).")
-        except PQCError as e:
+        except PQCSignatureError as e:
             self.log.exception(f"PQC signing failed: {e}")
             return MCPResponse(status='error', error_message=f"Client-side PQC signing failed: {e}")
         except Exception as e:
@@ -244,7 +250,10 @@ class MCPClient:
             self.log.debug(f"Encrypting final payload ({len(final_payload_bytes)} bytes) with AES-GCM...")
             nonce_bytes, ciphertext_bytes = encrypt_aes_gcm(self._session_key, final_payload_bytes)
             self.log.debug(f"Encryption successful. Nonce: {nonce_bytes.hex()[:16]}..., Ciphertext: {ciphertext_bytes.hex()[:16]}...")
-        except (ValueError, TypeError, PQCError) as e: 
+        except PQCEncryptionError as e:
+            self.log.exception(f"AES-GCM encryption failed: {e}")
+            return MCPResponse(status='error', error_message=f"Client-side encryption failed: {e}")
+        except (ValueError, TypeError) as e: 
             self.log.exception(f"AES-GCM encryption failed: {e}")
             return MCPResponse(status='error', error_message=f"Client-side encryption failed: {e}")
         except Exception as e:
@@ -254,7 +263,7 @@ class MCPClient:
         
         
         request_body = {
-            "clientKemPublicKeyB64": base64.b64encode(self._client_kem_keys[0]).decode('utf-8'),
+            "clientKemPublicKeyB64": base64.b64encode(self.client_kem_pk_bytes).decode('utf-8'),
             "nonceB64": base64.b64encode(nonce_bytes).decode('utf-8'),
             "encryptedPayloadB64": base64.b64encode(ciphertext_bytes).decode('utf-8'),
         }
@@ -295,11 +304,8 @@ class MCPClient:
         except (json.JSONDecodeError, base64.binascii.Error, ValueError, TypeError) as e:
             self.log.error(f"Error decoding/parsing server response: {e}")
             return MCPResponse(status='error', error_message=f"Failed to process server response: {e}")
-        except InvalidTag: 
-            self.log.error("Failed to decrypt server response (InvalidTag). Session key mismatch or corrupted data?")
-            return MCPResponse(status='error', error_message="Failed to decrypt server response (InvalidTag).")
-        except PQCError as e:
-            self.log.error(f"Decryption failed: {e}")
+        except PQCDecryptionError as e:
+            self.log.error(f"Failed to decrypt server response: {e}")
             return MCPResponse(status='error', error_message=f"Server response decryption failed: {e}")
         except Exception as e:
             self.log.exception("Unexpected error handling server response:")
@@ -307,12 +313,15 @@ class MCPClient:
 
         
         self.log.info("Verifying server response attestation signature...")
-        if not self._verify_attestation(server_response):
-            
+        attestation_ok, verification_error_msg = self._verify_attestation(server_response)
+        if not attestation_ok:
+            error_prefix = "ATTENTION: Attestation verification FAILED"
+            if verification_error_msg:
+                error_prefix += f" ({verification_error_msg})"
             
             server_response.status = 'error' 
-            server_response.error_message = (server_response.error_message + "; ATTENTION: Attestation verification FAILED" if server_response.error_message else "ATTENTION: Attestation verification FAILED")
-            
+            server_response.error_message = f"{error_prefix}{'; ' + server_response.error_message if server_response.error_message else ''}"
+            self.log.warning(server_response.error_message)
             return server_response
         else:
              self.log.info("Server attestation signature VERIFIED.")
@@ -341,9 +350,12 @@ class MCPClient:
             nonce, ciphertext = encrypt_aes_gcm(self._session_key, payload_bytes)
             self.log.debug(f"Payload encryption successful. Nonce: {nonce.hex()[:16]}..., Ciphertext: {ciphertext.hex()[:16]}...")
             return nonce, ciphertext
-        except Exception as e:
+        except PQCEncryptionError as e:
             self.log.exception(f"AES-GCM encryption failed during encrypt_payload: {e}")
-            raise RuntimeError(f"Payload encryption failed: {e}")
+            raise PQCEncryptionError(f"Payload encryption failed: {e}")
+        except Exception as e:
+            self.log.exception(f"Unexpected error during encrypt_payload: {e}")
+            raise RuntimeError(f"Payload encryption failed with an unexpected error: {e}")
 
     def disconnect(self):
         if not self._is_connected:
@@ -357,46 +369,55 @@ class MCPClient:
         self._http_session.close()
         self.log.info(f"Disconnected from {connected_url}.")
 
-    def _verify_attestation(self, response: MCPResponse) -> bool:
-        """Verifies the server's PQC attestation signature (SPHINCS+) over the attestation_data.
+    def _verify_attestation(self, response: MCPResponse) -> Tuple[bool, Optional[str]]:
+        """Verifies the server's PQC attestation signature.
 
         Returns:
-            bool: True if the signature is valid and matches the loaded server public key,
-                  False otherwise (including cases of missing data/signature or crypto errors).
+            Tuple[bool, Optional[str]]: (True if valid, error message if verification fails or data missing).
         """
-        if not self._server_sign_pubkey:
-            self.log.error("Cannot verify attestation: Server signing public key is not loaded.")
-            return False
+        if not self.server_sign_pk_bytes:
+            msg = "Cannot verify attestation: Server signing public key is not loaded."
+            self.log.error(msg)
+            return False, msg
+
+        self.log.debug(f"_verify_attestation: response.attestation_data is {'PRESENT' if response.attestation_data else 'MISSING/EMPTY'}")
+        sig_val = response.attestation_signature
+        self.log.debug(f"_verify_attestation: response.attestation_signature is {'PRESENT and NON-EMPTY bytes' if sig_val and isinstance(sig_val, bytes) and len(sig_val) > 0 else ('NONE or EMPTY bytes' if sig_val == b'' or sig_val is None else 'UNEXPECTED TYPE')}")
+        if sig_val and isinstance(sig_val, bytes) and len(sig_val) > 0:
+             self.log.debug(f"_verify_attestation: att_sig (first 20 hex): {sig_val.hex()[:20]}...")
+
         if not response.attestation_data or not response.attestation_signature:
-            self.log.warning("Cannot verify attestation: Attestation data or signature missing in the server response.")
-            
-            return False 
+            msg = "Cannot verify attestation: Attestation data or signature missing."
+            self.log.warning(msg)
+            return False, msg
 
         try:
-            
             attestation_string = json.dumps(response.attestation_data, sort_keys=True, separators=(',', ':'))
             attestation_bytes = attestation_string.encode('utf-8')
         except Exception as e:
-            self.log.exception(f"Error serializing attestation data for verification: {e}")
-            return False
+            msg = f"Error serializing attestation data: {e}"
+            self.log.exception(msg)
+            return False, msg
 
-        self.log.debug(f"Verifying server attestation signature ({SIG_ALG}) against known server public key...")
+        self.log.debug(f"Verifying server attestation signature ({ALGORITHMS['sig']}) against known server public key...")
         try:
             is_valid = verify_signature(
                 attestation_bytes,
                 response.attestation_signature,
-                self._server_sign_pubkey,
+                self.server_sign_pk_bytes,
                 ALGORITHMS['sig']
             )
-            return is_valid
-        except oqs.OpenSSLError as e:
-            
-            self.log.warning(f"Attestation signature verification failed: {e}")
-            return False
+            if not is_valid:
+                return False, "Signature mismatch"
+            return True, None
+        except PQCSignatureError as e:
+            msg = f"Attestation signature verification failed (PQC Error): {e}"
+            self.log.warning(msg)
+            return False, msg
         except Exception as e:
-            
-            self.log.exception(f"Unexpected error during attestation signature verification: {e}")
-            return False
+            msg = f"Unexpected error during attestation signature verification: {e}"
+            self.log.exception(msg) 
+            return False, msg
 
     def __del__(self):
         self.disconnect()

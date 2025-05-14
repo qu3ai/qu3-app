@@ -1,5 +1,4 @@
 import os
-import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
 import logging
@@ -52,8 +51,26 @@ def get_config_value(key: str, default: Any = None) -> Any:
 def get_key_dir() -> Path:
     """Returns the configured directory path for storing PQC keys."""
     key_dir_str = get_config_value('key_directory', DEFAULT_KEY_DIR_STR)
-    
     return Path(key_dir_str).expanduser().resolve()
+
+def ensure_key_dir_exists(key_dir_path: Optional[Path] = None) -> Path:
+    """Ensures the key directory exists, creating it if necessary.
+
+    Args:
+        key_dir_path: Optional specific path to ensure. If None, uses configured key_dir.
+
+    Returns:
+        The path to the key directory.
+    """
+    target_path = key_dir_path if key_dir_path is not None else get_key_dir()
+    
+    try:
+        target_path.mkdir(parents=True, exist_ok=True)
+        log.info(f"Ensured key directory exists: {target_path}")
+    except OSError as e:
+        log.error(f"Failed to create key directory {target_path}: {e}")
+        raise
+    return target_path
 
 def get_server_url() -> str:
     """Returns the configured default MCP server URL."""
@@ -118,7 +135,7 @@ def fetch_and_save_server_keys(server_url: str, key_dir: Path, kem_pub_filename:
     Returns:
         True if keys were fetched and saved successfully, False otherwise.
     """
-    keys_endpoint = urljoin(server_url.rstrip('/') + '/', "keys")
+    keys_endpoint = urljoin(server_url, "keys")
     log.info(f"Attempting to fetch server public keys from {keys_endpoint}...")
     try:
         response = requests.get(keys_endpoint, timeout=10)
