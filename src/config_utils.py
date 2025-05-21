@@ -39,6 +39,11 @@ def load_config() -> Dict[str, Any]:
             log.error(f"Error reading configuration file {CONFIG_FILE_PATH}: {e}")
     else:
         log.info(f"Configuration file {CONFIG_FILE_PATH} not found. Using default values.")
+        # Ensure that if config remains empty, _config_cache is explicitly set to a new dict
+        # This helps prevent issues if an empty dict was cached and then mutated elsewhere.
+        if not config: 
+            _config_cache = {} 
+            return _config_cache
 
     _config_cache = config
     return _config_cache
@@ -83,11 +88,11 @@ def save_key_pair_to_files(public_key: bytes, secret_key: bytes, pub_path: Path,
         pub_path.parent.mkdir(parents=True, exist_ok=True) 
         with open(pub_path, 'wb') as f_pub:
             f_pub.write(public_key)
+            os.chmod(pub_path, 0o644)
         with open(sec_path, 'wb') as f_sec:
             f_sec.write(secret_key)
-            
             os.chmod(sec_path, 0o600)
-        log.info(f"Saved key pair: Public='{pub_path.name}', Secret='{sec_path.name}'")
+        log.info(f"Saved key pair: Public='{pub_path.name}', Secret='{sec_path.name}' with permissions set.")
     except OSError as e:
         log.exception(f"Failed to save key pair ('{pub_path.name}', '{sec_path.name}'): {e}")
         raise 
@@ -122,7 +127,6 @@ def load_public_key_from_file(pub_path: Path) -> bytes:
         log.exception(f"Failed to load public key from '{pub_path.name}': {e}")
         raise 
 
-# Add function to fetch server keys
 def fetch_and_save_server_keys(server_url: str, key_dir: Path, kem_pub_filename: str = "server_kem.pub", sign_pub_filename: str = "server_sign.pub") -> bool:
     """Fetches server public keys from the /keys endpoint and saves them.
 
@@ -157,11 +161,13 @@ def fetch_and_save_server_keys(server_url: str, key_dir: Path, kem_pub_filename:
 
         with open(kem_path, 'wb') as f:
             f.write(server_kem_pk)
-        log.info(f"Saved server KEM public key to {kem_path}")
+        os.chmod(kem_path, 0o644)
+        log.info(f"Saved server KEM public key to {kem_path} with permissions set.")
 
         with open(sign_path, 'wb') as f:
             f.write(server_sign_pk)
-        log.info(f"Saved server signing public key to {sign_path}")
+        os.chmod(sign_path, 0o644)
+        log.info(f"Saved server signing public key to {sign_path} with permissions set.")
 
         return True
 
@@ -177,3 +183,29 @@ def fetch_and_save_server_keys(server_url: str, key_dir: Path, kem_pub_filename:
     except Exception as e:
         log.exception(f"Unexpected error fetching or saving server keys:")
         return False
+
+def get_logging_config() -> Dict[str, Any]:
+    """
+    Retrieves logging configuration (level and file) from the global config.
+    Defaults to INFO level and no file if not specified or invalid.
+    """
+    config = load_config()
+    logging_config = config.get('logging', {})
+
+    if not isinstance(logging_config, dict):
+        log.warning("Logging configuration is not a dictionary. Using default logging settings.")
+        logging_config = {}
+
+    level_str = logging_config.get('level', "INFO")
+    if not isinstance(level_str, str) or level_str.upper() not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+        log.warning(f"Invalid logging level '{level_str}'. Defaulting to INFO.")
+        level_str = "INFO"
+    else:
+        level_str = level_str.upper()
+
+    log_file = logging_config.get('file')
+    if log_file is not None and not isinstance(log_file, str):
+        log.warning(f"Invalid logging file path '{log_file}'. Defaulting to no file.")
+        log_file = None
+    
+    return {'level': level_str, 'file': log_file}

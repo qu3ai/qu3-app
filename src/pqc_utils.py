@@ -64,8 +64,8 @@ def generate_key_pair(algo_name: str) -> tuple[bytes, bytes]:
                 return public_key, secret_key
         else:
             raise ValueError(f"Unsupported or unknown PQC algorithm: {algo_name}")
-    except oqs.OpenSSLError as e:
-        raise PQCKeyGenerationError(f"Failed to generate {algo_name} key pair: {e}")
+    except (oqs.MechanismNotSupportedError, oqs.MechanismNotEnabledError) as e:
+        raise PQCKeyGenerationError(f"Failed to generate {algo_name} key pair (OQS Error): {e}")
     except Exception as e:
         raise PQCKeyGenerationError(f"An unexpected error occurred during {algo_name} key generation: {e}")
 
@@ -78,8 +78,8 @@ def sign_message(message: bytes, secret_key: bytes, sig_algo: str) -> bytes:
             signature = sig.sign(message)
             log.debug(f"Message signed using {sig_algo}.")
             return signature
-    except oqs.OpenSSLError as e:
-        raise PQCSignatureError(f"Failed to sign message using {sig_algo}: {e}")
+    except (oqs.MechanismNotSupportedError, oqs.MechanismNotEnabledError) as e:
+        raise PQCSignatureError(f"Failed to sign message using {sig_algo} (OQS Error): {e}")
     except Exception as e:
         raise PQCSignatureError(f"An unexpected error occurred during message signing with {sig_algo}: {e}")
 
@@ -92,11 +92,9 @@ def verify_signature(message: bytes, signature: bytes, public_key: bytes, sig_al
         with oqs.Signature(sig_algo) as sig:
             is_valid = sig.verify(message, signature, public_key)
             log.debug(f"Signature verification result using {sig_algo}: {is_valid}")
-            if not is_valid:
-                pass
             return is_valid
-    except oqs.OpenSSLError as e:
-        log.warning(f"Signature verification failed for {sig_algo} (OpenSSLError): {e}")
+    except (oqs.MechanismNotSupportedError, oqs.MechanismNotEnabledError) as e:
+        log.warning(f"Signature verification failed for {sig_algo} (OQS Error): {e}")
         return False
     except Exception as e:
         log.warning(f"Unexpected error during signature verification for {sig_algo}: {e}")
@@ -109,14 +107,14 @@ def kem_encapsulate(kem_algo: str, public_key: bytes) -> tuple[bytes, bytes]:
         tuple[bytes, bytes]: The generated ciphertext and the shared secret.
     """
     if not oqs.is_kem_enabled(kem_algo):
-        raise POCKEMError(f"KEM algorithm '{kem_algo}' is not enabled or supported.")
+        raise POCKEMError(f"KEM algorithm '{kem_algo}' is not enabled or supported by current build flags.")
     try:
         with oqs.KeyEncapsulation(kem_algo) as kem:
             ciphertext, shared_secret = kem.encap_secret(public_key)
             log.debug(f"Performed KEM encapsulation using {kem_algo}.")
             return ciphertext, shared_secret
-    except oqs.OpenSSLError as e:
-        raise POCKEMError(f"KEM encapsulation failed for {kem_algo}: {e}")
+    except (oqs.MechanismNotSupportedError, oqs.MechanismNotEnabledError) as e:
+        raise POCKEMError(f"KEM encapsulation failed for {kem_algo} (OQS Error): {e}")
     except Exception as e:
         raise POCKEMError(f"An unexpected error occurred during KEM encapsulation with {kem_algo}: {e}")
 
@@ -127,14 +125,14 @@ def kem_decapsulate(kem_algo: str, ciphertext: bytes, secret_key: bytes) -> byte
         bytes: The derived shared secret.
     """
     if not oqs.is_kem_enabled(kem_algo):
-        raise POCKEMError(f"KEM algorithm '{kem_algo}' is not enabled or supported.")
+        raise POCKEMError(f"KEM algorithm '{kem_algo}' is not enabled or supported by current build flags.")
     try:
         with oqs.KeyEncapsulation(kem_algo, secret_key) as kem:
             shared_secret = kem.decap_secret(ciphertext)
             log.debug(f"Performed KEM decapsulation using {kem_algo}.")
             return shared_secret
-    except oqs.OpenSSLError as e:
-        raise POCKEMError(f"KEM decapsulation failed for {kem_algo}: {e}")
+    except (oqs.MechanismNotSupportedError, oqs.MechanismNotEnabledError) as e:
+        raise POCKEMError(f"KEM decapsulation failed for {kem_algo} (OQS Error): {e}")
     except Exception as e:
         raise POCKEMError(f"An unexpected error occurred during KEM decapsulation with {kem_algo}: {e}")
 
