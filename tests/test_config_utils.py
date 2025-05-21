@@ -13,15 +13,12 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-
 from unittest.mock import patch
 
-MOCK_CONFIG_FILENAME = "temp_test_config.yaml"
+MOCK_CONFIG_FILENAME_BASENAME = "temp_test_config.yaml"
 
-# Patch the global CONFIG_FILE_PATH in config_utils *before* it's imported
-with patch('src.config_utils.CONFIG_FILE_PATH', Path(MOCK_CONFIG_FILENAME)):
-    from src import config_utils
-    from src import pqc_utils 
+from src import config_utils 
+from src import pqc_utils
 
 class TestConfigUtils(unittest.TestCase):
 
@@ -30,6 +27,7 @@ class TestConfigUtils(unittest.TestCase):
         """Set up a temporary directory for test file operations."""
         cls.temp_dir = tempfile.mkdtemp(prefix="qu3_test_config_")
         cls.temp_dir_path = Path(cls.temp_dir)
+        cls.MOCK_CONFIG_ABSOLUTE_PATH = cls.temp_dir_path / MOCK_CONFIG_FILENAME_BASENAME
         
         cls.kem_algo = pqc_utils.ALGORITHMS["kem"]
         cls.sig_algo = pqc_utils.ALGORITHMS["sig"]
@@ -40,27 +38,36 @@ class TestConfigUtils(unittest.TestCase):
     def tearDownClass(cls):
         """Clean up the temporary directory."""
         shutil.rmtree(cls.temp_dir)
-        
-        if Path(MOCK_CONFIG_FILENAME).exists():
-            os.remove(MOCK_CONFIG_FILENAME)
+        # MOCK_CONFIG_ABSOLUTE_PATH is removed by individual tests or setUp
 
     def setUp(self):
         """Ensure clean state before each test (clear cache, remove mock file)."""
         config_utils._config_cache = None 
-        if Path(MOCK_CONFIG_FILENAME).exists():
-            os.remove(MOCK_CONFIG_FILENAME)
+        if self.MOCK_CONFIG_ABSOLUTE_PATH.exists():
+            os.remove(self.MOCK_CONFIG_ABSOLUTE_PATH)
 
     def tearDown(self): 
-        self.setUp()
+        # Ensure the mock config file is cleaned up after each test, if not already by setUp of next
+        if self.MOCK_CONFIG_ABSOLUTE_PATH.exists():
+            os.remove(self.MOCK_CONFIG_ABSOLUTE_PATH)
+        config_utils._config_cache = None # Clear cache again
 
     def test_01_load_config_defaults(self):
         """Test loading config when file doesn't exist (uses defaults)."""
-        # Ensure file doesn't exist
-        self.assertFalse(Path(MOCK_CONFIG_FILENAME).exists())
-        config = config_utils.load_config()
-        self.assertEqual(config, {})
-        
-        self.assertEqual(config_utils.get_key_dir(), Path(config_utils.DEFAULT_KEY_DIR_STR).expanduser().resolve())
+        with patch('src.config_utils.CONFIG_FILE_PATH', self.MOCK_CONFIG_ABSOLUTE_PATH):
+            print(f"\n[Test 01] Testing with MOCK_CONFIG_ABSOLUTE_PATH: {self.MOCK_CONFIG_ABSOLUTE_PATH}")
+            
+            if self.MOCK_CONFIG_ABSOLUTE_PATH.exists():
+                 os.remove(self.MOCK_CONFIG_ABSOLUTE_PATH)
+            self.assertFalse(self.MOCK_CONFIG_ABSOLUTE_PATH.exists())
+            print(f"[Test 01] Exists before load_config: {self.MOCK_CONFIG_ABSOLUTE_PATH.exists()}")
+            config_utils._config_cache = None
+            config = config_utils.load_config()
+            print(f"[Test 01] Raw output of load_config: {config}")
+            self.assertEqual(config, {})
+            
+            # These should now use the defaults because load_config returned empty
+            self.assertEqual(config_utils.get_key_dir(), Path(config_utils.DEFAULT_KEY_DIR_STR).expanduser().resolve())
         self.assertEqual(config_utils.get_server_url(), config_utils.DEFAULT_SERVER_URL)
 
     def test_02_load_config_custom(self):
@@ -70,27 +77,42 @@ class TestConfigUtils(unittest.TestCase):
             'server_url': 'http://custom.example.com:9000',
             'some_other_setting': 123
         }
-        with open(MOCK_CONFIG_FILENAME, 'w') as f:
-            yaml.dump(custom_config, f)
+        with patch('src.config_utils.CONFIG_FILE_PATH', self.MOCK_CONFIG_ABSOLUTE_PATH):
+            print(f"\n[Test 02] Testing with MOCK_CONFIG_ABSOLUTE_PATH: {self.MOCK_CONFIG_ABSOLUTE_PATH}")
+            with open(self.MOCK_CONFIG_ABSOLUTE_PATH, 'w') as f:
+                yaml.dump(custom_config, f)
+            
+            print(f"[Test 02] Exists before load_config: {self.MOCK_CONFIG_ABSOLUTE_PATH.exists()}")
+            config_utils._config_cache = None
+            config = config_utils.load_config()
+            print(f"[Test 02] Raw output of load_config: {config}")
+            self.assertEqual(config, custom_config)
 
-        config = config_utils.load_config()
-        self.assertEqual(config, custom_config)
-        self.assertEqual(config_utils.get_key_dir(), self.temp_dir_path / "custom_keys")
-        self.assertEqual(config_utils.get_server_url(), 'http://custom.example.com:9000')
-        self.assertEqual(config_utils.get_config_value('some_other_setting'), 123)
-        
-        config_utils._config_cache['server_url'] = 'cached_value'
+            # These should use the custom values
+            self.assertEqual(config_utils.get_key_dir(), self.temp_dir_path / "custom_keys")
+            self.assertEqual(config_utils.get_server_url(), 'http://custom.example.com:9000')
+            self.assertEqual(config_utils.get_config_value('some_other_setting'), 123)
+            
+            # Test cache modification (though direct cache mod is not typical usage)
+            if config_utils._config_cache:
+                 config_utils._config_cache['server_url'] = 'cached_value'
         self.assertEqual(config_utils.get_server_url(), 'cached_value')
 
     def test_03_load_config_invalid_yaml(self):
         """Test loading config with invalid YAML content."""
-        with open(MOCK_CONFIG_FILENAME, 'w') as f:
-            f.write("key: value: nested_invalid") 
-
-        config = config_utils.load_config()
-        self.assertEqual(config, {}) 
-        
-        self.assertEqual(config_utils.get_key_dir(), Path(config_utils.DEFAULT_KEY_DIR_STR).expanduser().resolve())
+        with patch('src.config_utils.CONFIG_FILE_PATH', self.MOCK_CONFIG_ABSOLUTE_PATH):
+            print(f"\n[Test 03] Testing with MOCK_CONFIG_ABSOLUTE_PATH: {self.MOCK_CONFIG_ABSOLUTE_PATH}")
+            with open(self.MOCK_CONFIG_ABSOLUTE_PATH, 'w') as f:
+                f.write("key: value: nested_invalid") 
+            
+            print(f"[Test 03] Exists before load_config: {self.MOCK_CONFIG_ABSOLUTE_PATH.exists()}")
+            config_utils._config_cache = None
+            config = config_utils.load_config()
+            print(f"[Test 03] Raw output of load_config: {config}")
+            self.assertEqual(config, {}) 
+            
+            # These should use the defaults
+            self.assertEqual(config_utils.get_key_dir(), Path(config_utils.DEFAULT_KEY_DIR_STR).expanduser().resolve())
         self.assertEqual(config_utils.get_server_url(), config_utils.DEFAULT_SERVER_URL)
 
     def test_04_save_load_key_pair(self):
@@ -108,6 +130,7 @@ class TestConfigUtils(unittest.TestCase):
         self.assertTrue(sec_path.exists())
         
         self.assertEqual(sec_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(pub_path.stat().st_mode & 0o777, 0o644)
 
         
         loaded_pk, loaded_sk = config_utils.load_key_pair_from_files(pub_path, sec_path)
@@ -156,7 +179,6 @@ class TestConfigUtils(unittest.TestCase):
         kem_path = self.temp_dir_path / kem_file
         sign_path = self.temp_dir_path / sign_file
 
-        # Ensure files don't exist initially
         self.assertFalse(kem_path.exists())
         self.assertFalse(sign_path.exists())
 
@@ -171,6 +193,8 @@ class TestConfigUtils(unittest.TestCase):
         self.assertTrue(sign_path.exists())
         self.assertEqual(kem_path.read_bytes(), self.dummy_kem_pk)
         self.assertEqual(sign_path.read_bytes(), self.dummy_sig_pk)
+        self.assertEqual(kem_path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(sign_path.stat().st_mode & 0o777, 0o644)
 
     @patch('src.config_utils.requests.get')
     def test_09_fetch_keys_network_error(self, mock_get):
@@ -240,6 +264,59 @@ class TestConfigUtils(unittest.TestCase):
         mock_get.assert_called_once()
         
         self.assertTrue(mock_open.called)
+
+    def test_14_get_logging_config(self):
+        """Test retrieving logging configuration from config.yaml."""
+        
+        scenarios = [
+            ("fully_configured", 
+             {'logging': {'level': 'DEBUG', 'file': 'test.log'}}, 
+             {'level': 'DEBUG', 'file': 'test.log'}),
+            ("missing_level", 
+             {'logging': {'file': 'app.log'}}, 
+             {'level': 'INFO', 'file': 'app.log'}),
+            ("missing_file", 
+             {'logging': {'level': 'WARNING'}}, 
+             {'level': 'WARNING', 'file': None}),
+            ("invalid_level_str", 
+             {'logging': {'level': 'INVALID', 'file': 'err.log'}}, 
+             {'level': 'INFO', 'file': 'err.log'}),
+            ("invalid_level_type", 
+             {'logging': {'level': 123, 'file': 'err.log'}}, 
+             {'level': 'INFO', 'file': 'err.log'}),
+            ("no_logging_section", 
+             {'other_config': 'value'}, 
+             {'level': 'INFO', 'file': None}),
+            ("logging_not_dict", 
+             {'logging': 'not_a_dictionary'}, 
+             {'level': 'INFO', 'file': None}),
+            ("empty_config_file", 
+             {}, 
+             {'level': 'INFO', 'file': None}),
+            ("no_config_file",
+             None,
+             {'level': 'INFO', 'file': None}),
+        ]
+
+        for name, config_content, expected_log_config in scenarios:
+            with self.subTest(name=name):
+                if self.MOCK_CONFIG_ABSOLUTE_PATH.exists():
+                    os.remove(self.MOCK_CONFIG_ABSOLUTE_PATH)
+                config_utils._config_cache = None
+
+                if config_content is not None:
+                    with open(self.MOCK_CONFIG_ABSOLUTE_PATH, 'w') as f:
+                        yaml.dump(config_content, f)
+                
+                with patch('src.config_utils.CONFIG_FILE_PATH', self.MOCK_CONFIG_ABSOLUTE_PATH):
+                    config_utils._config_cache = None 
+                    actual_log_config = config_utils.get_logging_config()
+                    self.assertEqual(actual_log_config, expected_log_config)
+                
+                if self.MOCK_CONFIG_ABSOLUTE_PATH.exists():
+                    os.remove(self.MOCK_CONFIG_ABSOLUTE_PATH)
+                config_utils._config_cache = None
+
 
 if __name__ == '__main__':
     unittest.main() 

@@ -1,6 +1,5 @@
 import logging
 from urllib.parse import urljoin
-import click
 import typer
 import json
 import os
@@ -22,47 +21,159 @@ from .config_utils import (
     ensure_key_dir_exists,
     load_config,
     get_server_url,
-    fetch_and_save_server_keys
+    fetch_and_save_server_keys,
+    get_logging_config
 )
 from src import pqc_utils
 
+logging_settings = get_logging_config()
+numeric_level = getattr(logging, logging_settings['level'].upper(), logging.INFO)
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+if logging_settings['file']:
+    logging.basicConfig(level=numeric_level, filename=logging_settings['file'], format=log_format)
+else:
+    logging.basicConfig(level=numeric_level, format=log_format)
+
+log = logging.getLogger(__name__)
+
 app = typer.Typer()
 
-get_key_dir().mkdir(parents=True, exist_ok=True)
+try:
+    get_key_dir().mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    log.error(f"Failed to create key directory {get_key_dir()}: {e}")
+    pass
 
 client_kem_algo = ALGORITHMS["kem"]
 client_sign_algo = ALGORITHMS["sig"]
-server_kem_pub_file = get_key_dir() / "server_kem.pub"
-server_sign_pub_file = get_key_dir() / "server_sign.pub"
-client_kem_key_pair_files = (
-    get_key_dir() / "client_kem.pub",
-    get_key_dir() / "client_kem.sec",
-)
-client_sign_key_pair_files = (
-    get_key_dir() / "client_sign.pub",
-    get_key_dir() / "client_sign.sec",
-)
 
-logging.basicConfig(level=logging.DEBUG)
-log = logging.getLogger(__name__)
+def _load_or_generate_client_key_pair(
+    key_dir: Path, 
+    key_name: str, 
+    algo: str, 
+    force_generate: bool = False
+) -> Optional[tuple[bytes, bytes]]:
+    """
+    Loads a client key pair (public, secret) from files if they exist,
+    or generates a new pair if they don't or if force_generate is True.
 
-def _get_key_paths(key_dir_path: Path) -> Dict[str, Any]:
-    """Helper to define all key file paths based on a key directory."""
-    return {
-        "server_kem_pub": key_dir_path / "server_kem.pub",
-        "server_sign_pub": key_dir_path / "server_sign.pub",
-        "client_kem_pub": key_dir_path / "client_kem.pub",
-        "client_kem_sec": key_dir_path / "client_kem.sec",
-        "client_sign_pub": key_dir_path / "client_sign.pub",
-        "client_sign_sec": key_dir_path / "client_sign.sec",
-    }
+    Args:
+        key_dir: The directory where keys are stored.
+        key_name: The base name for the key files (e.g., "client_kem").
+        algo: The PQC algorithm to use for key generation.
+        force_generate: If True, always generates a new key pair, overwriting existing ones.
 
-def initialize_client(config: dict, server_url_override: Optional[str] = None) -> Optional[dict]:
-    """Initializes the MCPClient state, handling key loading/generation and server key fetching.
+    Returns:
+        A tuple (public_key_bytes, secret_key_bytes) or None if an error occurs.
+    """
+    pub_path = key_dir / f"{key_name}.pub"
+    sec_path = key_dir / f"{key_name}.sec"
+    key_type_log_name = key_name.replace("_", " ").upper() # For logging e.g. "CLIENT KEM"
+
+    if force_generate:
+        log.info(f"Force generating new {key_type_log_name} keys in {key_dir}...")
+        try:
+            pk_bytes, sk_bytes = generate_key_pair(algo)
+            save_key_pair_to_files(pk_bytes, sk_bytes, pub_path, sec_path)
+            log.info(f"New {key_type_log_name} keys generated and saved successfully.")
+            if typer.get_current_context(resilient=True):
+                typer.secho(f"{key_type_log_name} keys generated and saved.", fg=typer.colors.GREEN)
+            return pk_bytes, sk_bytes
+        except (pqc_utils.PQCError, IOError) as e:
+            log.exception(f"Failed to generate or save {key_type_log_name} keys: {e}")
+            if typer.get_current_context(resilient=True):
+                typer.secho(f"Error: Failed to generate/save {key_type_log_name} keys: {e}", fg=typer.colors.RED, err=True)
+            return None
+
+    try:
+        log.debug(f"Attempting to load {key_type_log_name} keys from {key_dir}...")
+        pk_bytes, sk_bytes = load_key_pair_from_files(pub_path, sec_path)
+        log.info(f"{key_type_log_name} keys loaded from {key_dir}")
+        return pk_bytes, sk_bytes
+    except FileNotFoundError:
+        log.info(f"{key_type_log_name} keys not found in {key_dir}. Generating new keys...")
+        try:
+            pk_bytes, sk_bytes = generate_key_pair(algo)
+            save_key_pair_to_files(pk_bytes, sk_bytes, pub_path, sec_path)
+            log.info(f"{key_type_log_name} keys generated and saved to {key_dir}")
+            return pk_bytes, sk_bytes
+        except (pqc_utils.PQCError, IOError) as e:
+            log.exception(f"Failed to generate or save {key_type_log_name} keys after FileNotFoundError: {e}")
+            if typer.get_current_context(resilient=True):
+                 typer.secho(f"Error: Failed to generate/save {key_type_log_name} keys: {e}", fg=typer.colors.RED, err=True)
+            return None
+    except (IOError, pqc_utils.PQCError) as e:
+        log.exception(f"Failed to load {key_type_log_name} keys: {e}")
+        if typer.get_current_context(resilient=True):
+            typer.secho(f"Error: Failed to load {key_type_log_name} keys: {e}", fg=typer.colors.RED, err=True)
+        return None
+
+def _ensure_server_public_keys(key_dir: Path, server_url: str) -> Optional[tuple[bytes, bytes]]:
+    """
+    Ensures server public keys (KEM and signing) are available, loading them from files
+    or fetching from the server if not found.
+
+    Args:
+        key_dir: The directory where keys are stored/expected.
+        server_url: The URL of the MCP server to fetch keys from if needed.
+
+    Returns:
+        A tuple (server_kem_pk_bytes, server_sign_pk_bytes) or None if an error occurs.
+    """
+    server_kem_pub_path = key_dir / "server_kem.pub"
+    server_sign_pub_path = key_dir / "server_sign.pub"
+
+    try:
+        log.debug("Attempting to load server public keys...")
+        server_kem_pk_bytes = load_public_key_from_file(server_kem_pub_path)
+        server_sign_pk_bytes = load_public_key_from_file(server_sign_pub_path)
+        log.info(f"Server public keys loaded from {key_dir}")
+        return server_kem_pk_bytes, server_sign_pk_bytes
+    except FileNotFoundError:
+        log.warning(
+            f"Server public keys ({server_kem_pub_path.name}, {server_sign_pub_path.name}) "
+            f"not found locally in {key_dir}. Attempting to fetch from server {server_url}..."
+        )
+        if typer.get_current_context(resilient=True):
+            typer.echo(f"Server keys not found locally, attempting to fetch from {server_url}...")
+
+        if fetch_and_save_server_keys(server_url, key_dir, server_kem_pub_path.name, server_sign_pub_path.name):
+            log.info("Successfully fetched and saved server public keys.")
+            if typer.get_current_context(resilient=True):
+                typer.secho("Server keys fetched and saved successfully.", fg=typer.colors.GREEN)
+            try:
+                server_kem_pk_bytes = load_public_key_from_file(server_kem_pub_path)
+                server_sign_pk_bytes = load_public_key_from_file(server_sign_pub_path)
+                log.info(f"Server public keys loaded from {key_dir} after fetching.")
+                return server_kem_pk_bytes, server_sign_pk_bytes
+            except (IOError, pqc_utils.PQCError, FileNotFoundError) as e:
+                 log.exception(f"Failed to load server keys even after successful fetching: {e}")
+                 if typer.get_current_context(resilient=True):
+                     typer.secho(f"Error: Failed to load server keys after fetching: {e}", fg=typer.colors.RED, err=True)
+                 return None
+        else:
+            log.error(f"Failed to fetch server public keys from {server_url}.")
+            if typer.get_current_context(resilient=True):
+                typer.secho(f"Error: Could not find server keys locally or fetch them from {server_url}/keys.", fg=typer.colors.RED, err=True)
+                typer.secho("Please ensure the server is running and keys are available, or place them manually.", fg=typer.colors.YELLOW, err=True)
+            return None
+    except (IOError, pqc_utils.PQCError) as e:
+        log.exception(f"Error loading server public keys from {key_dir}: {e}")
+        if typer.get_current_context(resilient=True):
+            typer.secho(f"Error: Failed to load server public keys: {e}", fg=typer.colors.RED, err=True)
+        return None
+
+def initialize_client(config: dict, server_url_override: Optional[str] = None, force_new_client_keys: bool = False) -> Optional[dict]:
+    """
+    Initializes the MCPClient state by loading/generating client keys,
+    ensuring server public keys are available, and then creating the MCPClient instance.
 
     Args:
         config: The loaded configuration dictionary.
         server_url_override: A server URL provided via CLI, overrides config.
+        force_new_client_keys: If True, forces regeneration of client KEM and signing keys.
+                               Used by the `generate-keys` command.
 
     Returns:
         A dictionary containing the initialized MCPClient instance and client keys,
@@ -75,90 +186,36 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
 
     resolved_server_url = server_url_override or get_server_url()
     if not resolved_server_url:
-        log.error("MCP Server URL is not configured and not provided.")
-        print("Error: Server URL missing in config.yaml and --server-url option.")
+        log.error("MCP Server URL is not configured and not provided via CLI option.")
+        if typer.get_current_context(resilient=True):
+             typer.secho("Error: Server URL missing. Provide via --server-url or in config.yaml.", fg=typer.colors.RED, err=True)
         return None
 
     log.info(f"Using Key Directory: {key_dir}")
     log.info(f"Target Server URL: {resolved_server_url}")
 
-    paths = _get_key_paths(key_dir)
-
-    try:
-        log.debug("Attempting to load client KEM keys...")
-        client_kem_pk_bytes, client_kem_sk_bytes = load_key_pair_from_files(
-            paths["client_kem_pub"], paths["client_kem_sec"]
-        )
-        log.info(f"Client KEM keys loaded from {key_dir}")
-    except FileNotFoundError:
-        log.info("Client KEM keys not found. Generating new keys...")
-        try:
-            client_kem_pk_bytes, client_kem_sk_bytes = generate_key_pair(client_kem_algo)
-            save_key_pair_to_files(
-                client_kem_pk_bytes, client_kem_sk_bytes, paths["client_kem_pub"], paths["client_kem_sec"]
-            )
-            log.info(f"Client KEM keys generated and saved to {key_dir}")
-        except (pqc_utils.PQCError, IOError) as e:
-            log.exception(f"Failed to generate or save client KEM keys: {e}")
-            print(f"Error: Failed to generate/save client KEM keys: {e}")
-            return None
-    except (IOError, pqc_utils.PQCError) as e:
-        log.exception(f"Failed to load client KEM keys: {e}")
-        print(f"Error: Failed to load client KEM keys: {e}")
+    client_kem_keys = _load_or_generate_client_key_pair(
+        key_dir, "client_kem", client_kem_algo, force_new_client_keys
+    )
+    if not client_kem_keys:
+        log.error("Failed to load or generate client KEM keys.")
         return None
+    client_kem_pk_bytes, client_kem_sk_bytes = client_kem_keys
 
-    try:
-        log.debug("Attempting to load client signing keys...")
-        client_sign_pk_bytes, client_sign_sk_bytes = load_key_pair_from_files(
-            paths["client_sign_pub"], paths["client_sign_sec"]
-        )
-        log.info(f"Client signing keys loaded from {key_dir}")
-    except FileNotFoundError:
-        log.info("Client signing keys not found. Generating new keys...")
-        try:
-            client_sign_pk_bytes, client_sign_sk_bytes = generate_key_pair(client_sign_algo)
-            save_key_pair_to_files(
-                client_sign_pk_bytes, client_sign_sk_bytes, paths["client_sign_pub"], paths["client_sign_sec"]
-            )
-            log.info(f"Client signing keys generated and saved to {key_dir}")
-        except (pqc_utils.PQCError, IOError) as e:
-            log.exception(f"Failed to generate or save client signing keys: {e}")
-            print(f"Error: Failed to generate/save client signing keys: {e}")
-            return None
-    except (IOError, pqc_utils.PQCError) as e:
-        log.exception(f"Failed to load client signing keys: {e}")
-        print(f"Error: Failed to load client signing keys: {e}")
+    client_sign_keys = _load_or_generate_client_key_pair(
+        key_dir, "client_sign", client_sign_algo, force_new_client_keys
+    )
+    if not client_sign_keys:
+        log.error("Failed to load or generate client signing keys.")
         return None
+    client_sign_pk_bytes, client_sign_sk_bytes = client_sign_keys
 
-    try:
-        log.debug("Attempting to load server public keys...")
-        server_kem_pk_bytes = load_public_key_from_file(paths["server_kem_pub"])
-        server_sign_pk_bytes = load_public_key_from_file(paths["server_sign_pub"])
-        log.info(f"Server public keys loaded from {key_dir}")
-    except FileNotFoundError:
-        log.warning(
-            f"Server public keys ({paths['server_kem_pub'].name}, {paths['server_sign_pub'].name}) "
-            f"not found locally in {key_dir}. Attempting to fetch from server..."
-        )
-        if fetch_and_save_server_keys(resolved_server_url, key_dir, paths["server_kem_pub"].name, paths["server_sign_pub"].name):
-            log.info("Successfully fetched and saved server public keys.")
-            try:
-                server_kem_pk_bytes = load_public_key_from_file(paths["server_kem_pub"])
-                server_sign_pk_bytes = load_public_key_from_file(paths["server_sign_pub"])
-            except (IOError, pqc_utils.PQCError) as e:
-                 log.exception(f"Failed to load server keys even after fetching: {e}")
-                 print(f"Error: Failed to load server keys after fetching: {e}")
-                 return None
-        else:
-            log.error("Failed to fetch server public keys from the server.")
-            print(f"Error: Could not find server keys locally or fetch them from {resolved_server_url}/keys.")
-            print("Please ensure the server is running and keys are available, or place them manually.")
-            return None
-    except (IOError, pqc_utils.PQCError) as e:
-        log.exception(f"Error loading server public keys: {e}")
-        print(f"Error: Failed to load server public keys: {e}")
+    server_keys = _ensure_server_public_keys(key_dir, resolved_server_url)
+    if not server_keys:
+        log.error("Failed to load or fetch server public keys.")
         return None
-
+    server_kem_pk_bytes, server_sign_pk_bytes = server_keys
+    
     try:
         log.debug("Initializing MCPClient instance...")
         client = MCPClient(
@@ -179,11 +236,11 @@ def initialize_client(config: dict, server_url_override: Optional[str] = None) -
 
     except ValueError as e:
         log.exception(f"Failed to initialize MCPClient: {e}")
-        print(f"Error: Failed to initialize MCP client (likely invalid keys): {e}")
+        typer.secho(f"Error: Failed to initialize MCP client (likely invalid keys): {e}", fg=typer.colors.RED, err=True)
         return None
     except Exception as e:
         log.exception(f"Unexpected error initializing MCPClient instance: {e}")
-        print(f"Error: Unexpected error initializing MCP client: {e}")
+        typer.secho(f"Error: Unexpected error initializing MCP client: {e}", fg=typer.colors.RED, err=True)
         return None
 
 
@@ -284,39 +341,69 @@ def generate_keys(
 ):
     """
     Generates and saves new PQC key pairs (KEM and signing) for this client instance.
-
-    These keys are essential for establishing secure sessions and authenticating
-    requests to the MCP server.
+    If --force is not used, it will not overwrite existing keys of a given type
+    if they are already present and loadable.
     Does NOT affect server keys.
     """
-    print(f"Generating keys in: {get_key_dir()}")
+    key_dir = get_key_dir()
+    ensure_key_dir_exists(key_dir)
+    typer.echo(f"Managing keys in: {key_dir}")
 
+    # Determine if we need to check for existing files (if not --force)
+    # _load_or_generate_client_key_pair handles the logic of checking existence 
+    # if force_generate is False.
+    # However, the original command had a specific behavior: if --force was *not* used,
+    # it would exit if *any* key file existed. This is slightly different from the helper,
+    # which would only skip generation for the specific key type if its files exist.
+    # To replicate the original behavior for the "don't overwrite without --force" check:
     if not force:
-        if client_kem_key_pair_files[0].exists() or client_kem_key_pair_files[1].exists():
-            print(
-                f"Client KEM key files already exist in {get_key_dir()}. Use --force to overwrite."
+        client_kem_pub_path = key_dir / "client_kem.pub"
+        client_kem_sec_path = key_dir / "client_kem.sec"
+        client_sign_pub_path = key_dir / "client_sign.pub"
+        client_sign_sec_path = key_dir / "client_sign.sec"
+
+        if client_kem_pub_path.exists() or client_kem_sec_path.exists():
+            typer.secho(
+                f"Client KEM key files already exist in {key_dir}. Use --force to overwrite.",
+                fg=typer.colors.YELLOW,
             )
-            raise typer.Exit(code=1)
-        if client_sign_key_pair_files[0].exists() or client_sign_key_pair_files[1].exists():
-            print(
-                f"Client signing key files already exist in {get_key_dir()}. Use --force to overwrite."
+        if client_sign_pub_path.exists() or client_sign_sec_path.exists():
+            typer.secho(
+                f"Client signing key files already exist in {key_dir}. Use --force to overwrite.",
+                fg=typer.colors.YELLOW,
             )
-            raise typer.Exit(code=1)
+        if (client_kem_pub_path.exists() or client_kem_sec_path.exists()) and \
+           (client_sign_pub_path.exists() or client_sign_sec_path.exists()) and \
+           not force: # This last check for not force is a bit redundant due to outer if, but for clarity.
+             typer.secho("Both KEM and Signing keys exist. Use --force to overwrite specific keys or all keys.", fg=typer.colors.YELLOW)
+             # raise typer.Exit(code=1)
 
-    print(f"Generating client KEM key pair ({client_kem_algo})...")
-    client_kem_pk, client_kem_sk = generate_key_pair(client_kem_algo)
-    save_key_pair_to_files(client_kem_pk, client_kem_sk, *client_kem_key_pair_files)
-    print(f"Client KEM keys generated and saved.")
+    typer.echo(f"Attempting to load or generate client KEM key pair ({client_kem_algo})...")
+    kem_keys = _load_or_generate_client_key_pair(key_dir, "client_kem", client_kem_algo, force_generate=force)
+    if kem_keys:
+        typer.secho(f"Client KEM keys processed successfully.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Failed to process client KEM keys.", fg=typer.colors.RED, err=True)
+        # raise typer.Exit(code=1)
 
-    print(f"Generating client signing key pair ({client_sign_algo})...")
-    client_sign_pk, client_sign_sk = generate_key_pair(client_sign_algo)
-    save_key_pair_to_files(client_sign_pk, client_sign_sk, *client_sign_key_pair_files)
-    print(f"Client signing keys generated and saved.")
 
-    print("\nKey generation complete.")
-    print(
-        f"IMPORTANT: Ensure the corresponding server public keys ({server_kem_pub_file.name}, {server_sign_pub_file.name}) "
-        f"are present in {get_key_dir()} before running inference."
+    typer.echo(f"\nAttempting to load or generate client signing key pair ({client_sign_algo})...")
+    sign_keys = _load_or_generate_client_key_pair(key_dir, "client_sign", client_sign_algo, force_generate=force)
+    if sign_keys:
+        typer.secho(f"Client signing keys processed successfully.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Failed to process client signing keys.", fg=typer.colors.RED, err=True)
+        # raise typer.Exit(code=1)
+
+    if kem_keys and sign_keys:
+        typer.echo("\nKey management complete.")
+    else:
+        typer.secho("\nKey management encountered errors. Please check logs.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+        
+    typer.secho(
+        f"IMPORTANT: Ensure the corresponding server public keys (server_kem.pub, server_sign.pub) "
+        f"are present in {key_dir} before running inference.", bold=True
     )
 
 
@@ -331,10 +418,10 @@ def run_agent(
     """
     Executes a multi-step agent workflow on the MCP server.
     """
-    print("--- Running Agent Workflow --- ")
-    print(f"Target Server: {server_url}")
-    print(f"Workflow Definition: {workflow}")
-    print(f"Initial Input: {initial_input}")
+    typer.echo("--- Running Agent Workflow --- ")
+    typer.echo(f"Target Server: {server_url}")
+    typer.echo(f"Workflow Definition: {workflow}")
+    typer.echo(f"Initial Input: {initial_input}")
 
     try:
         steps = [s.strip() for s in workflow.split('->') if s.strip()]
@@ -485,61 +572,72 @@ def run_agent(
             client_state["client"].disconnect()
 
 
-@click.command('update-policy')
-@click.option('--policy-file', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to the policy file.")
-@click.option('--server-url', default=None, help="MCP server URL (overrides config).")
-def update_policy(policy_file: str, server_url: str | None):
+@app.command("update-policy")
+def update_policy(
+    policy_file: Path = typer.Option(
+        ..., 
+        help="Path to the policy file.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        writable=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    server_url: Optional[str] = typer.Option(
+        None, 
+        "--server-url", 
+        help="MCP server URL (overrides config)."
+    )
+):
     """Connects to the MCP, encrypts, signs, and sends a policy update."""
     config = load_config()
-    if server_url is None:
-        server_url = get_server_url(config)
-    if not server_url:
+    resolved_server_url = server_url or get_server_url()
+    
+    if not resolved_server_url:
         log.error("Server URL not found in config and not provided via CLI.")
-        print("Error: Server URL missing.")
-        return
+        typer.secho("Error: Server URL missing.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
     log.info(f"Attempting to update policy using file: {policy_file}")
-    log.info(f"Target server URL: {server_url}")
+    log.info(f"Target server URL: {resolved_server_url}")
 
     mcp_client = None 
     client_state = None
     try:
-        client_state = initialize_client(config, server_url)
+        client_state = initialize_client(config, resolved_server_url)
         if not client_state:
             log.error("Failed to initialize client state.")
-            print("Error: Failed to initialize MCP client.")
-            return
+            typer.secho("Error: Failed to initialize MCP client.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
 
         mcp_client = client_state["client"]
         client_sign_sk_bytes = client_state["client_sign_sk_bytes"]
         client_kem_pk_bytes = client_state["client_kem_pk_bytes"]
-        resolved_server_url = client_state["server_url"]
 
-        with open(policy_file, 'r') as f:
-            policy_content = f.read()
+        policy_content = policy_file.read_text(encoding='utf-8')
         policy_bytes = policy_content.encode('utf-8') 
-
         
+        if not mcp_client.connect(resolved_server_url):
+            log.error("Failed to connect to the server (KEM handshake failed?).")
+            typer.secho("Error: Failed to connect to the server.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
         
         if not mcp_client.session_key:
-             log.error("Client does not have a session key. Connection likely failed.")
-             print("Error: Secure session not established.")
-             return
-
+             log.error("Client does not have a session key. Connection likely failed or was not established properly.")
+             typer.secho("Error: Secure session not established.", fg=typer.colors.RED)
+             raise typer.Exit(code=1)
         
         log.debug("Signing policy content...")
         policy_signature_bytes = sign_message(policy_bytes, client_sign_sk_bytes, client_sign_algo)
         log.debug(f"Policy signature (first 10 bytes): {policy_signature_bytes[:10].hex()}...")
 
-        
         log.debug("Encrypting policy content...")
         nonce_bytes, ciphertext_bytes = mcp_client.encrypt_payload(policy_bytes)
         log.debug(f"Nonce (first 10 bytes): {nonce_bytes[:10].hex()}...")
         log.debug(f"Ciphertext (first 10 bytes): {ciphertext_bytes[:10].hex()}...")
-
         
         request_data = {
-            
             "client_kem_pub_key_b64": base64.b64encode(client_kem_pk_bytes).decode('utf-8'),
             "nonce_b64": base64.b64encode(nonce_bytes).decode('utf-8'),
             "ciphertext_b64": base64.b64encode(ciphertext_bytes).decode('utf-8'),
@@ -548,14 +646,13 @@ def update_policy(policy_file: str, server_url: str | None):
 
         policy_endpoint = urljoin(resolved_server_url.rstrip('/') + '/', "policy-update")
         log.info(f"Sending policy update to {policy_endpoint}")
-        print(f"Sending policy update ({len(policy_bytes)} bytes) to {policy_endpoint}...")
+        typer.echo(f"Sending policy update ({len(policy_bytes)} bytes) to {policy_endpoint}...")
 
         response = mcp_client.session.post(policy_endpoint, json=request_data, timeout=30) 
         response.raise_for_status() 
         log.info(f"Received response from server (Status: {response.status_code}).")
 
         response_data = response.json()
-
         
         log.debug("Processing server response...")
         resp_nonce_b64 = response_data.get('nonce_b64')
@@ -564,8 +661,8 @@ def update_policy(policy_file: str, server_url: str | None):
 
         if not all([resp_nonce_b64, resp_ciphertext_b64, resp_signature_b64]):
             log.error("Incomplete response received from server.")
-            print("Error: Incomplete response from server.")
-            return
+            typer.secho("Error: Incomplete response from server.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
 
         resp_nonce_bytes = base64.b64decode(resp_nonce_b64)
         resp_ciphertext_bytes = base64.b64decode(resp_ciphertext_b64)
@@ -576,9 +673,7 @@ def update_policy(policy_file: str, server_url: str | None):
         log.debug(f"Response signature (first 10 bytes): {resp_signature_bytes[:10].hex()}...")
 
         try:
-            
             decrypted_response_payload_bytes = decrypt_aes_gcm(mcp_client.session_key, resp_nonce_bytes, resp_ciphertext_bytes)
-            
             log.debug("Server response for policy update decrypted.")
             
             server_status_message_str = decrypted_response_payload_bytes.decode('utf-8')
@@ -587,8 +682,8 @@ def update_policy(policy_file: str, server_url: str | None):
             server_sign_pk_bytes = mcp_client.server_sign_pk_bytes 
             if not server_sign_pk_bytes:
                  log.error("Server signing public key not available. Cannot verify response.")
-                 print("Error: Cannot verify server response (missing server public key).")
-                 return
+                 typer.secho("Error: Cannot verify server response (missing server public key).", fg=typer.colors.RED)
+                 raise typer.Exit(code=1)
 
             log.debug("Verifying server signature on policy update response...")
             is_server_sig_valid = verify_signature(
@@ -599,48 +694,60 @@ def update_policy(policy_file: str, server_url: str | None):
             )
             if is_server_sig_valid:
                 log.info("Server response signature VERIFIED successfully.")
-                print(f"Server response signature VERIFIED.")
+                typer.secho("Server response signature VERIFIED.", fg=typer.colors.GREEN)
+            else:
+                log.error("Server response signature verification FAILED (verify_signature returned False).")
+                typer.secho("Error: Server response signature verification failed!", fg=typer.colors.RED)
+                raise InvalidSignature("Server response signature verification failed.")
 
-            
+
             try:
                 status_json = json.loads(server_status_message_str)
-                print(f"Server status: {status_json.get('status', server_status_message_str)}")
+                typer.echo(f"Server status: {status_json.get('status', server_status_message_str)}")
             except json.JSONDecodeError:
-                 print(f"Server status (raw): {server_status_message_str}") 
-
+                 typer.echo(f"Server status (raw): {server_status_message_str}") 
 
         except (InvalidTag, ValueError) as e:
-            log.error(f"Failed to decrypt server response: {e}")
-            print("Error: Failed to decrypt the server's response. It might be corrupted or the session key is mismatched.")
+            log.error(f"Failed to decrypt or decode server response: {e}")
+            typer.secho(f"Error: Failed to decrypt/decode server's response: {e}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
         except InvalidSignature:
             log.error("Server response signature verification FAILED.")
-            print("Error: Server response signature verification failed! The response may be tampered with or from an impostor.")
+            typer.secho("Error: Server response signature verification failed! The response may be tampered with or from an impostor.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
         except Exception as e: 
             log.error(f"Error processing decrypted server response: {e}")
-            print(f"Error: Failed to process the server's decrypted response: {e}")
-
+            typer.secho(f"Error: Failed to process the server's decrypted response: {e}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
 
     except requests.exceptions.ConnectionError as e:
         log.error(f"Connection error during policy update: {e}")
-        print(f"Error: Could not connect to the server at {server_url}.")
+        typer.secho(f"Error: Could not connect to the server at {resolved_server_url}.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     except requests.exceptions.Timeout:
-        log.error(f"Request timed out connecting to {server_url}")
-        print("Error: The request to the server timed out.")
+        log.error(f"Request timed out connecting to {resolved_server_url}")
+        typer.secho("Error: The request to the server timed out.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     except requests.exceptions.RequestException as e:
         log.error(f"Network error during policy update: {e}")
-        print(f"Error: Network error communicating with the server: {e}")
+        typer.secho(f"Error: Network error communicating with the server: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     except FileNotFoundError:
         log.error(f"Policy file not found: {policy_file}")
-        print(f"Error: Policy file not found at {policy_file}")
+        typer.secho(f"Error: Policy file not found at {policy_file}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     except pqc_utils.PQCSignatureException as e:
         log.error(f"PQC signing error: {e}")
-        print(f"Error: Failed to sign the policy content: {e}")
-    except (pqc_utils.PQCEncryptionException, ValueError, TypeError) as e: 
+        typer.secho(f"Error: Failed to sign the policy content: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except (pqc_utils.PQCEncryptionException, base64.binascii.Error, ValueError, TypeError) as e: 
          log.error(f"Encryption/Encoding error: {e}")
-         print(f"Error: Failed to encrypt or encode the policy content: {e}")
+         typer.secho(f"Error: Failed to encrypt or encode the policy content: {e}", fg=typer.colors.RED)
+         raise typer.Exit(code=1)
     except Exception as e:
         log.exception("An unexpected error occurred during policy update:") 
-        print(f"An unexpected error occurred: {e}")
+        typer.secho(f"An unexpected error occurred: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     finally:
         if client_state and client_state.get("client"):
             client = client_state["client"]
@@ -650,6 +757,7 @@ def update_policy(policy_file: str, server_url: str | None):
                     log.info("Client disconnected.")
                 except Exception as e:
                      log.error(f"Error during client disconnection: {e}")
+                     # typer.secho(f"Warning: Error during client disconnection: {e}", fg=typer.colors.YELLOW)
 
 
 if __name__ == "__main__":

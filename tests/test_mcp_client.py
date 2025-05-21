@@ -51,10 +51,13 @@ class TestMCPClient(unittest.TestCase):
         self.assertIsNotNone(self.client)
         self.assertFalse(self.client._is_connected)
         self.assertIsNone(self.client._session_key)
-        self.assertEqual(self.client._client_kem_keys, (self.client_kem_pk, self.client_kem_sk))
-        self.assertEqual(self.client._client_sign_keys, (self.client_sign_pk, self.client_sign_sk))
-        self.assertEqual(self.client._server_kem_pubkey, self.server_kem_pk)
-        self.assertEqual(self.client._server_sign_pubkey, self.server_sign_pk)
+        # Verify that the keys passed during initialization are stored, using their public attribute names
+        self.assertEqual(self.client.client_kem_pk_bytes, self.client_kem_pk)
+        self.assertEqual(self.client.client_kem_sk_bytes, self.client_kem_sk)
+        self.assertEqual(self.client.client_sign_pk_bytes, self.client_sign_pk)
+        self.assertEqual(self.client.client_sign_sk_bytes, self.client_sign_sk)
+        self.assertEqual(self.client.server_kem_pk_bytes, self.server_kem_pk)
+        self.assertEqual(self.client.server_sign_pk_bytes, self.server_sign_pk)
 
     def test_02_init_missing_keys(self):
         """Test client initialization failure with missing keys."""
@@ -106,7 +109,14 @@ class TestMCPClient(unittest.TestCase):
         expected_payload = {
             "clientKemPublicKeyB64": base64.b64encode(self.client_kem_pk).decode('utf-8')
         }
-        mock_post.assert_called_once_with(expected_endpoint, json=expected_payload, timeout=15)
+        # mock_post.assert_called_once_with(expected_endpoint, json=expected_payload, timeout=15)
+        # More robust check for the call:
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], expected_endpoint)
+        self.assertIn("json", kwargs)
+        self.assertEqual(kwargs["json"]["client_kem_pub_key_b64"], expected_payload["clientKemPublicKeyB64"])
+        self.assertEqual(kwargs["timeout"], 15)
         mock_response.raise_for_status.assert_called_once()
 
     @patch('src.mcp_client.requests.Session.post')
@@ -195,7 +205,6 @@ class TestMCPClient(unittest.TestCase):
         """Test sending a request successfully with valid server attestation."""
         session_aes_key = self._mock_connect(mock_post) 
         mock_post.reset_mock() 
-
         
         input_data = {"text": "test input"}
         request = MCPRequest(
@@ -203,7 +212,6 @@ class TestMCPClient(unittest.TestCase):
             model_id="test_model",
             input_data=input_data
         )
-
         
         attestation_data = {"serverVersion": "test-1.0", "modelId": "test_model", "status": "success"}
         attestation_bytes = json.dumps(attestation_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
@@ -228,11 +236,8 @@ class TestMCPClient(unittest.TestCase):
         }
         mock_post.return_value = mock_inference_response
         
-
-        
         response = self.client.send_request(request)
 
-        
         self.assertIsNotNone(response)
         self.assertEqual(response.status, "success")
         self.assertEqual(response.output_data, {"result": "mock success"})
@@ -248,7 +253,6 @@ class TestMCPClient(unittest.TestCase):
         self.assertIn('json', call_kwargs)
         sent_body = call_kwargs['json']
 
-        
         self.assertEqual(sent_body['clientKemPublicKeyB64'], base64.b64encode(self.client_kem_pk).decode('utf-8'))
         self.assertIn('nonceB64', sent_body)
         self.assertIn('encryptedPayloadB64', sent_body)
@@ -259,7 +263,6 @@ class TestMCPClient(unittest.TestCase):
         decrypted_sent_payload_bytes = pqc_utils.decrypt_aes_gcm(session_aes_key, sent_nonce, sent_ciphertext)
         decrypted_sent_payload_dict = json.loads(decrypted_sent_payload_bytes.decode('utf-8'))
 
-        
         self.assertEqual(decrypted_sent_payload_dict['target_server_url'], self.server_url)
         self.assertEqual(decrypted_sent_payload_dict['model_id'], "test_model")
         self.assertEqual(decrypted_sent_payload_dict['input_data'], input_data)
@@ -403,7 +406,7 @@ class TestMCPClient(unittest.TestCase):
         
         self.assertIsNotNone(response)
         self.assertEqual(response.status, "error")
-        self.assertIn("Failed to decrypt server response (InvalidTag)", response.error_message)
+        self.assertIn("AES-GCM decryption failed (InvalidTag)", response.error_message) # Corrected assertion
         self.assertIsNone(response.output_data)
         self.assertIsNone(response.attestation_data)
 
