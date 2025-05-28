@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  qu3-client:
+    build: .
+    container_name: qu3-client
+    environment:
+      - QU3_ENV=development
+      - PYTHONPATH=/app
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - qu3-keys:/home/qu3user/.qu3/keys
+    networks:
+      - qu3-network
+    depends_on:
+      - qu3-server
+    command: ["python3", "-m", "src.main", "generate-keys"]
+
+  qu3-server:
+    build: .
+    container_name: qu3-server
+    environment:
+      - QU3_ENV=development
+      - PYTHONPATH=/app
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - qu3-keys:/home/qu3user/.qu3/keys
+    ports:
+      - "8000:8000"
+    networks:
+      - qu3-network
+    command: ["python3", "-m", "scripts.mock_mcp_server"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  qu3-keys:
+    driver: local
+
+networks:
+  qu3-network:
+    driver: bridge
+
