@@ -261,7 +261,7 @@ python -m unittest tests.test_mcp_client
 
 ## 🆕 Latest Updates
 
-This release includes significant improvements to developer experience:
+The newest release includes significant improvements to developer experience:
 
 ### New CLI Commands
 - `validate-config`: Comprehensive environment and configuration validation
@@ -276,23 +276,3 @@ This release includes significant improvements to developer experience:
 
 ### Documentation & Examples
 - Comprehensive troubleshooting guide (`TROUBLESHOOTING.md`)
-- Practical usage examples (`examples/`)
-- Development update documentation (`DEVELOPMENT_UPDATE.md`)
-- CI/CD pipeline with GitHub Actions
-
-### Quick Start
-```bash
-# Easy installation
-./scripts/install.sh
-
-# Validate setup
-python -m src.main validate-config
-
-# Test connection
-python -m src.main test-connection
-
-# Run benchmarks
-python -m src.main benchmark
-```
-
-For detailed information, see [DEVELOPMENT_UPDATE.md](DEVELOPMENT_UPDATE.md).
