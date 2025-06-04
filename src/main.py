@@ -760,5 +760,239 @@ def update_policy(
                      # typer.secho(f"Warning: Error during client disconnection: {e}", fg=typer.colors.YELLOW)
 
 
+@app.command("validate-config")
+def validate_config():
+    """Validates the current configuration and environment setup."""
+    typer.echo("🔍 Validating QU3 configuration and environment...")
+    
+    try:
+        # Load and validate configuration
+        config = load_config()
+        typer.secho("✅ Configuration loaded successfully", fg=typer.colors.GREEN)
+        
+        # Check key directory
+        key_dir = get_key_dir()
+        if key_dir.exists():
+            typer.secho(f"✅ Key directory exists: {key_dir}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"⚠️  Key directory does not exist: {key_dir}", fg=typer.colors.YELLOW)
+            
+        # Check server URL
+        server_url = get_server_url()
+        if server_url:
+            typer.secho(f"✅ Server URL configured: {server_url}", fg=typer.colors.GREEN)
+        else:
+            typer.secho("❌ Server URL not configured", fg=typer.colors.RED)
+            
+        # Check for client keys
+        client_kem_pub = key_dir / "client_kem.pub"
+        client_kem_sec = key_dir / "client_kem.sec"
+        client_sign_pub = key_dir / "client_sign.pub"
+        client_sign_sec = key_dir / "client_sign.sec"
+        
+        if all(p.exists() for p in [client_kem_pub, client_kem_sec, client_sign_pub, client_sign_sec]):
+            typer.secho("✅ Client keys found", fg=typer.colors.GREEN)
+        else:
+            typer.secho("⚠️  Some client keys missing - run 'generate-keys' to create them", fg=typer.colors.YELLOW)
+            
+        # Check for server keys
+        server_kem_pub = key_dir / "server_kem.pub"
+        server_sign_pub = key_dir / "server_sign.pub"
+        
+        if all(p.exists() for p in [server_kem_pub, server_sign_pub]):
+            typer.secho("✅ Server public keys found", fg=typer.colors.GREEN)
+        else:
+            typer.secho("⚠️  Server public keys missing - they will be fetched automatically", fg=typer.colors.YELLOW)
+            
+        typer.secho("\n🎉 Configuration validation complete!", fg=typer.colors.GREEN)
+        
+    except Exception as e:
+        typer.secho(f"❌ Configuration validation failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command("inspect-keys")
+def inspect_keys():
+    """Inspects and displays information about stored keys."""
+    typer.echo("🔑 Inspecting QU3 keys...")
+    
+    try:
+        key_dir = get_key_dir()
+        if not key_dir.exists():
+            typer.secho(f"❌ Key directory does not exist: {key_dir}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+            
+        # Check client keys
+        typer.echo("\n📋 Client Keys:")
+        client_keys = [
+            ("KEM Public", "client_kem.pub"),
+            ("KEM Secret", "client_kem.sec"),
+            ("Sign Public", "client_sign.pub"),
+            ("Sign Secret", "client_sign.sec")
+        ]
+        
+        for key_type, filename in client_keys:
+            key_path = key_dir / filename
+            if key_path.exists():
+                size = key_path.stat().st_size
+                typer.secho(f"  ✅ {key_type}: {filename} ({size} bytes)", fg=typer.colors.GREEN)
+            else:
+                typer.secho(f"  ❌ {key_type}: {filename} (missing)", fg=typer.colors.RED)
+                
+        # Check server keys
+        typer.echo("\n🖥️  Server Keys:")
+        server_keys = [
+            ("KEM Public", "server_kem.pub"),
+            ("Sign Public", "server_sign.pub")
+        ]
+        
+        for key_type, filename in server_keys:
+            key_path = key_dir / filename
+            if key_path.exists():
+                size = key_path.stat().st_size
+                typer.secho(f"  ✅ {key_type}: {filename} ({size} bytes)", fg=typer.colors.GREEN)
+            else:
+                typer.secho(f"  ❌ {key_type}: {filename} (missing)", fg=typer.colors.RED)
+                
+        typer.echo(f"\n📁 Key directory: {key_dir}")
+        
+    except Exception as e:
+        typer.secho(f"❌ Key inspection failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command("test-connection")
+def test_connection(
+    server_url: Optional[str] = typer.Option(
+        None, 
+        "--server-url", 
+        help="MCP server URL to test (overrides config)."
+    )
+):
+    """Tests connection to the MCP server without performing operations."""
+    resolved_server_url = server_url or get_server_url()
+    
+    if not resolved_server_url:
+        typer.secho("❌ Server URL not configured", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+        
+    typer.echo(f"🔗 Testing connection to {resolved_server_url}...")
+    
+    try:
+        # Test basic connectivity
+        import requests
+        response = requests.get(f"{resolved_server_url.rstrip('/')}/", timeout=10)
+        if response.status_code == 200:
+            typer.secho("✅ Server is reachable", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"⚠️  Server responded with status {response.status_code}", fg=typer.colors.YELLOW)
+            
+        # Test keys endpoint
+        keys_response = requests.get(f"{resolved_server_url.rstrip('/')}/keys", timeout=10)
+        if keys_response.status_code == 200:
+            typer.secho("✅ Server keys endpoint is accessible", fg=typer.colors.GREEN)
+            keys_data = keys_response.json()
+            if 'kem_public_key_b64' in keys_data and 'sign_public_key_b64' in keys_data:
+                typer.secho("✅ Server keys are properly formatted", fg=typer.colors.GREEN)
+            else:
+                typer.secho("⚠️  Server keys response format unexpected", fg=typer.colors.YELLOW)
+        else:
+            typer.secho(f"❌ Server keys endpoint failed: {keys_response.status_code}", fg=typer.colors.RED)
+            
+        typer.secho("\n🎉 Connection test complete!", fg=typer.colors.GREEN)
+        
+    except requests.exceptions.ConnectionError:
+        typer.secho(f"❌ Cannot connect to server at {resolved_server_url}", fg=typer.colors.RED)
+        typer.secho("💡 Make sure the server is running and the URL is correct", fg=typer.colors.BLUE)
+        raise typer.Exit(code=1)
+    except requests.exceptions.Timeout:
+        typer.secho(f"❌ Connection to {resolved_server_url} timed out", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"❌ Connection test failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command("benchmark")
+def benchmark(
+    iterations: int = typer.Option(10, "--iterations", "-n", help="Number of iterations to run"),
+    server_url: Optional[str] = typer.Option(None, "--server-url", help="MCP server URL (overrides config)")
+):
+    """Runs performance benchmarks for quantum-safe operations."""
+    typer.echo(f"⚡ Running QU3 performance benchmark ({iterations} iterations)...")
+    
+    import time
+    from statistics import mean, stdev
+    
+    try:
+        # Benchmark key generation
+        typer.echo("\n🔑 Benchmarking key generation...")
+        kem_times = []
+        sign_times = []
+        
+        for i in range(iterations):
+            # KEM key generation
+            start = time.time()
+            generate_key_pair(client_kem_algo)
+            kem_times.append(time.time() - start)
+            
+            # Signature key generation
+            start = time.time()
+            generate_key_pair(client_sign_algo)
+            sign_times.append(time.time() - start)
+            
+            if (i + 1) % max(1, iterations // 4) == 0:
+                typer.echo(f"  Progress: {i + 1}/{iterations}")
+                
+        typer.secho(f"  KEM key generation: {mean(kem_times)*1000:.2f}ms ± {stdev(kem_times)*1000:.2f}ms", fg=typer.colors.CYAN)
+        typer.secho(f"  Signature key generation: {mean(sign_times)*1000:.2f}ms ± {stdev(sign_times)*1000:.2f}ms", fg=typer.colors.CYAN)
+        
+        # Benchmark encryption/decryption if we have keys
+        key_dir = get_key_dir()
+        if key_dir.exists():
+            typer.echo("\n🔐 Benchmarking encryption/decryption...")
+            
+            # Generate test data
+            test_data = b"This is test data for benchmarking encryption performance." * 10
+            
+            # Generate a test key for AES
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+            from cryptography.hazmat.primitives import hashes
+            import os
+            
+            shared_secret = os.urandom(32)
+            derived_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=None,
+                info=b'qu3-benchmark'
+            ).derive(shared_secret)
+            
+            encrypt_times = []
+            decrypt_times = []
+            
+            for i in range(iterations):
+                # Encryption
+                start = time.time()
+                from src.pqc_utils import encrypt_aes_gcm
+                nonce, ciphertext = encrypt_aes_gcm(derived_key, test_data)
+                encrypt_times.append(time.time() - start)
+                
+                # Decryption
+                start = time.time()
+                from src.pqc_utils import decrypt_aes_gcm
+                decrypted = decrypt_aes_gcm(derived_key, nonce, ciphertext)
+                decrypt_times.append(time.time() - start)
+                
+            typer.secho(f"  Encryption ({len(test_data)} bytes): {mean(encrypt_times)*1000:.2f}ms ± {stdev(encrypt_times)*1000:.2f}ms", fg=typer.colors.CYAN)
+            typer.secho(f"  Decryption ({len(test_data)} bytes): {mean(decrypt_times)*1000:.2f}ms ± {stdev(decrypt_times)*1000:.2f}ms", fg=typer.colors.CYAN)
+        
+        typer.secho("\n🎉 Benchmark complete!", fg=typer.colors.GREEN)
+        
+    except Exception as e:
+        typer.secho(f"❌ Benchmark failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

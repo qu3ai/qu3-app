@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "QU3 Team", email = "team@qu3.dev"}
+    {name = "QU3 Team", email = "joseph@qu3.ai"}
 ]
 keywords = ["quantum-safe", "post-quantum", "cryptography", "mcp", "client"]
 classifiers = [

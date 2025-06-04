@@ -182,6 +182,18 @@ graph LR
     *(Note: `liboqs-python` might require system dependencies like a C compiler and the `liboqs` C library. Refer to its documentation if installation fails.)*
 4.  **(Optional) Configure `config.yaml`:** Modify `key_directory` or `server_url` if needed. The default key directory is `~/.qu3/keys/`.
 
+### Quick Start
+```bash
+# Easy installation
+./scripts/install.sh
+# Validate setup
+python -m src.main validate-config
+# Test connection
+python -m src.main test-connection
+# Run benchmarks
+python -m src.main benchmark
+```
+
 ## Running the Mock Server
 
 In one terminal, run:
@@ -246,3 +258,41 @@ python -m unittest tests.test_pqc_utils
 python -m unittest tests.test_config_utils
 python -m unittest tests.test_mcp_client
 ```
+
+## 🆕 Latest Updates
+
+This release includes significant improvements to developer experience:
+
+### New CLI Commands
+- `validate-config`: Comprehensive environment and configuration validation
+- `inspect-keys`: Detailed key inspection and status reporting  
+- `test-connection`: Server connectivity testing without operations
+- `benchmark`: Performance measurement for quantum-safe operations
+
+### Enhanced Installation
+- Automated installation script (`scripts/install.sh`) handles complex dependencies
+- Docker development environment improvements
+- Better error handling and diagnostics
+
+### Documentation & Examples
+- Comprehensive troubleshooting guide (`TROUBLESHOOTING.md`)
+- Practical usage examples (`examples/`)
+- Development update documentation (`DEVELOPMENT_UPDATE.md`)
+- CI/CD pipeline with GitHub Actions
+
+### Quick Start
+```bash
+# Easy installation
+./scripts/install.sh
+
+# Validate setup
+python -m src.main validate-config
+
+# Test connection
+python -m src.main test-connection
+
+# Run benchmarks
+python -m src.main benchmark
+```
+
+For detailed information, see [DEVELOPMENT_UPDATE.md](DEVELOPMENT_UPDATE.md).
