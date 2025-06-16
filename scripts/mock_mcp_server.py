@@ -300,6 +300,346 @@ def run_inference_secure(request: EncryptedRequest):
                 error_message = ("Invalid input for model_reverse: 'text' field must be a string "
                                  "and present in input_data.")
                 log.warning(f"model_reverse: 'text' is not a string or missing. input_data: {processed_input_data}")
+        
+        # Text Analysis Models
+        elif model_id == "sentiment_analysis":
+            text = processed_input_data.get("text")
+            if isinstance(text, str) and text.strip():
+                try:
+                    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+                    analyzer = SentimentIntensityAnalyzer()
+                    scores = analyzer.polarity_scores(text)
+                    
+                    # Determine overall sentiment based on compound score
+                    compound = scores['compound']
+                    if compound >= 0.05:
+                        sentiment = "positive"
+                    elif compound <= -0.05:
+                        sentiment = "negative"
+                    else:
+                        sentiment = "neutral"
+                    
+                    # Calculate confidence based on compound score magnitude
+                    confidence = abs(compound)
+                    if confidence < 0.05:
+                        confidence = 0.1  # Low confidence for neutral
+                    
+                    output_data = {
+                        "sentiment": sentiment,
+                        "confidence": round(confidence, 3),
+                        "compound_score": round(compound, 3),
+                        "positive_score": round(scores['pos'], 3),
+                        "negative_score": round(scores['neg'], 3),
+                        "neutral_score": round(scores['neu'], 3),
+                        "text_length": len(text),
+                        "analysis_method": "VADER"
+                    }
+                except ImportError:
+                    # Fallback to basic analysis if VADER not available
+                    output_data = {
+                        "sentiment": "neutral",
+                        "confidence": 0.1,
+                        "error": "VADER sentiment analysis not available",
+                        "analysis_method": "fallback"
+                    }
+            else:
+                status = "error"
+                error_message = "Invalid input for sentiment_analysis: 'text' field must be a non-empty string."
+                
+        elif model_id == "keyword_extraction":
+            text = processed_input_data.get("text")
+            if isinstance(text, str) and text.strip():
+                import re
+                from collections import Counter
+                import math
+                
+                # Remove punctuation and convert to lowercase
+                words = re.findall(r'\b[a-zA-Z]{2,}\b', text.lower())
+                
+                # Comprehensive stop words list
+                stop_words = {
+                    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one", "our", "out", "day", "get", "has", "him", "his", "how", "man", "new", "now", "old", "see", "two", "way", "who", "boy", "did", "its", "let", "put", "say", "she", "too", "use", "may", "come", "could", "each", "even", "find", "from", "have", "here", "into", "just", "like", "look", "make", "more", "most", "only", "over", "such", "take", "than", "that", "them", "well", "were", "what", "when", "will", "with", "would", "your", "this", "they", "been", "their", "said", "each", "which", "there", "time", "very", "after", "first", "never", "these", "think", "where", "being", "every", "great", "might", "shall", "still", "those", "under", "while"
+                }
+                
+                # Filter out stop words and short words
+                filtered_words = [word for word in words if word not in stop_words and len(word) >= 3]
+                
+                if not filtered_words:
+                    output_data = {
+                        "keywords": [],
+                        "total_words": len(words),
+                        "unique_words": 0,
+                        "filtered_words": 0,
+                        "analysis_method": "frequency_based"
+                    }
+                else:
+                    # Count word frequency
+                    word_counts = Counter(filtered_words)
+                    total_filtered = len(filtered_words)
+                    
+                    # Calculate TF-IDF-like scores (simplified)
+                    keywords_with_scores = []
+                    for word, count in word_counts.items():
+                        tf = count / total_filtered  # Term frequency
+                        # Simple IDF approximation based on word length and frequency
+                        idf = math.log(total_filtered / count) + (len(word) / 10)
+                        score = tf * idf
+                        keywords_with_scores.append({
+                            "word": word,
+                            "frequency": count,
+                            "tf_score": round(tf, 4),
+                            "relevance_score": round(score, 4)
+                        })
+                    
+                    # Sort by relevance score and get top 10
+                    keywords_with_scores.sort(key=lambda x: x["relevance_score"], reverse=True)
+                    top_keywords = keywords_with_scores[:10]
+                    
+                    output_data = {
+                        "keywords": top_keywords,
+                        "total_words": len(words),
+                        "unique_words": len(set(words)),
+                        "filtered_words": len(filtered_words),
+                        "unique_filtered": len(set(filtered_words)),
+                        "analysis_method": "tf_idf_based"
+                    }
+            else:
+                status = "error"
+                error_message = "Invalid input for keyword_extraction: 'text' field must be a non-empty string."
+        
+        # Data Processing Models
+        elif model_id == "json_formatter":
+            data = processed_input_data.get("data")
+            if data is not None:
+                try:
+                    # If data is a string, try to parse it as JSON
+                    if isinstance(data, str):
+                        import json
+                        parsed_data = json.loads(data)
+                    else:
+                        parsed_data = data
+                    
+                    # Format with proper indentation
+                    formatted_json = json.dumps(parsed_data, indent=2, sort_keys=True)
+                    output_data = {
+                        "formatted_json": formatted_json,
+                        "is_valid": True,
+                        "size_bytes": len(formatted_json)
+                    }
+                except (json.JSONDecodeError, TypeError) as e:
+                    output_data = {
+                        "formatted_json": None,
+                        "is_valid": False,
+                        "error": str(e)
+                    }
+            else:
+                status = "error"
+                error_message = "Invalid input for json_formatter: 'data' field is required."
+                
+        elif model_id == "csv_analyzer":
+            csv_data = processed_input_data.get("csv_data")
+            if isinstance(csv_data, str):
+                try:
+                    import csv
+                    from io import StringIO
+                    
+                    # Parse CSV data
+                    csv_reader = csv.reader(StringIO(csv_data))
+                    rows = list(csv_reader)
+                    
+                    if not rows:
+                        output_data = {"error": "Empty CSV data"}
+                    else:
+                        headers = rows[0] if rows else []
+                        data_rows = rows[1:] if len(rows) > 1 else []
+                        
+                        # Basic analysis
+                        analysis = {
+                            "total_rows": len(data_rows),
+                            "total_columns": len(headers),
+                            "headers": headers,
+                            "sample_data": data_rows[:3] if data_rows else [],
+                            "column_stats": {}
+                        }
+                        
+                        # Analyze each column
+                        for i, header in enumerate(headers):
+                            column_data = [row[i] if i < len(row) else "" for row in data_rows]
+                            non_empty = [val for val in column_data if val.strip()]
+                            
+                            analysis["column_stats"][header] = {
+                                "non_empty_count": len(non_empty),
+                                "empty_count": len(column_data) - len(non_empty),
+                                "sample_values": non_empty[:3]
+                            }
+                        
+                        output_data = analysis
+                except Exception as e:
+                    output_data = {"error": f"CSV parsing error: {str(e)}"}
+            else:
+                status = "error"
+                error_message = "Invalid input for csv_analyzer: 'csv_data' field must be a string."
+        
+        # Code Utility Models
+        elif model_id == "code_formatter":
+            code = processed_input_data.get("code")
+            language = processed_input_data.get("language", "python")
+            
+            if isinstance(code, str):
+                # Simple code formatting (basic indentation)
+                lines = code.split('\n')
+                formatted_lines = []
+                indent_level = 0
+                
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        formatted_lines.append("")
+                        continue
+                    
+                    # Decrease indent for closing brackets/keywords
+                    if any(stripped.startswith(keyword) for keyword in ['end', '}', ')', ']', 'else:', 'elif', 'except:', 'finally:']):
+                        indent_level = max(0, indent_level - 1)
+                    
+                    # Add indentation
+                    formatted_lines.append("    " * indent_level + stripped)
+                    
+                    # Increase indent for opening brackets/keywords
+                    if any(stripped.endswith(char) for char in ['{', '(', '[']) or any(stripped.endswith(keyword) for keyword in [':', 'then', 'do']):
+                        indent_level += 1
+                
+                output_data = {
+                    "formatted_code": '\n'.join(formatted_lines),
+                    "language": language,
+                    "original_lines": len(lines),
+                    "formatted_lines": len(formatted_lines)
+                }
+            else:
+                status = "error"
+                error_message = "Invalid input for code_formatter: 'code' field must be a string."
+                
+        elif model_id == "code_validator":
+            code = processed_input_data.get("code")
+            language = processed_input_data.get("language", "python")
+            
+            if isinstance(code, str):
+                issues = []
+                
+                # Basic validation checks
+                if language.lower() == "python":
+                    # Check for common Python issues
+                    lines = code.split('\n')
+                    for i, line in enumerate(lines, 1):
+                        if line.strip():
+                            # Check for mixed tabs and spaces
+                            if '\t' in line and '    ' in line:
+                                issues.append(f"Line {i}: Mixed tabs and spaces")
+                            
+                            # Check for missing colons
+                            stripped = line.strip()
+                            if any(stripped.startswith(keyword) for keyword in ['if ', 'for ', 'while ', 'def ', 'class ', 'try', 'except', 'else', 'elif']):
+                                if not stripped.endswith(':'):
+                                    issues.append(f"Line {i}: Missing colon after {stripped.split()[0]}")
+                
+                # Try to compile/parse if possible
+                syntax_valid = True
+                syntax_error = None
+                
+                if language.lower() == "python":
+                    try:
+                        compile(code, '<string>', 'exec')
+                    except SyntaxError as e:
+                        syntax_valid = False
+                        syntax_error = str(e)
+                        issues.append(f"Syntax Error: {syntax_error}")
+                
+                output_data = {
+                    "is_valid": syntax_valid and len(issues) == 0,
+                    "syntax_valid": syntax_valid,
+                    "issues": issues,
+                    "language": language,
+                    "lines_checked": len(code.split('\n'))
+                }
+            else:
+                status = "error"
+                error_message = "Invalid input for code_validator: 'code' field must be a string."
+        
+        # Mathematical Models
+        elif model_id == "math_calculator":
+            expression = processed_input_data.get("expression")
+            if isinstance(expression, str):
+                try:
+                    # Safe evaluation of mathematical expressions
+                    import re
+                    import math
+                    
+                    # Only allow safe mathematical operations
+                    allowed_chars = set('0123456789+-*/().^ ')
+                    allowed_functions = ['sin', 'cos', 'tan', 'log', 'sqrt', 'abs', 'pow']
+                    
+                    # Basic safety check
+                    if all(c in allowed_chars or c.isalpha() for c in expression):
+                        # Replace ^ with **
+                        safe_expr = expression.replace('^', '**')
+                        
+                        # Create safe namespace
+                        safe_dict = {
+                            "__builtins__": {},
+                            "sin": math.sin, "cos": math.cos, "tan": math.tan,
+                            "log": math.log, "sqrt": math.sqrt, "abs": abs,
+                            "pow": pow, "pi": math.pi, "e": math.e
+                        }
+                        
+                        result = eval(safe_expr, safe_dict)
+                        output_data = {
+                            "result": result,
+                            "expression": expression,
+                            "is_valid": True
+                        }
+                    else:
+                        output_data = {
+                            "result": None,
+                            "expression": expression,
+                            "is_valid": False,
+                            "error": "Expression contains invalid characters"
+                        }
+                except Exception as e:
+                    output_data = {
+                        "result": None,
+                        "expression": expression,
+                        "is_valid": False,
+                        "error": str(e)
+                    }
+            else:
+                status = "error"
+                error_message = "Invalid input for math_calculator: 'expression' field must be a string."
+                
+        elif model_id == "statistics_analyzer":
+            numbers = processed_input_data.get("numbers")
+            if isinstance(numbers, list) and all(isinstance(x, (int, float)) for x in numbers):
+                if len(numbers) > 0:
+                    import statistics
+                    
+                    try:
+                        output_data = {
+                            "count": len(numbers),
+                            "sum": sum(numbers),
+                            "mean": statistics.mean(numbers),
+                            "median": statistics.median(numbers),
+                            "min": min(numbers),
+                            "max": max(numbers),
+                            "range": max(numbers) - min(numbers),
+                            "std_dev": statistics.stdev(numbers) if len(numbers) > 1 else 0,
+                            "variance": statistics.variance(numbers) if len(numbers) > 1 else 0
+                        }
+                    except Exception as e:
+                        output_data = {"error": f"Statistics calculation error: {str(e)}"}
+                else:
+                    output_data = {"error": "Empty numbers list"}
+            else:
+                status = "error"
+                error_message = "Invalid input for statistics_analyzer: 'numbers' field must be a list of numbers."
+        
         else:
             status = "error"
             error_message = f"Unknown model ID: '{model_id}'"
@@ -483,7 +823,221 @@ def get_server_public_keys():
         raise HTTPException(status_code=500, detail="Error preparing server keys.")
 
 
+class ModelInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+    category: str
+    input_schema: Dict[str, Any]
+    output_schema: Dict[str, Any]
+    example_input: Dict[str, Any]
+    example_output: Dict[str, Any]
+
+class ModelsResponse(BaseModel):
+    models: list[ModelInfo]
+    total_count: int
+
+@app.get("/models", response_model=ModelsResponse)
+def get_available_models():
+    """Returns information about all available models."""
+    log.info("Request received for /models endpoint.")
+    
+    models = [
+        ModelInfo(
+            id="model_caps",
+            name="Text Capitalizer",
+            description="Converts input text to uppercase",
+            category="text_processing",
+            input_schema={"text": "string (required)"},
+            output_schema={"capitalized_text": "string"},
+            example_input={"text": "hello world"},
+            example_output={"capitalized_text": "HELLO WORLD"}
+        ),
+        ModelInfo(
+            id="model_reverse",
+            name="Text Reverser",
+            description="Reverses the input text character by character",
+            category="text_processing",
+            input_schema={"text": "string (required)"},
+            output_schema={"reversed_text": "string"},
+            example_input={"text": "hello world"},
+            example_output={"reversed_text": "dlrow olleh"}
+        ),
+        ModelInfo(
+            id="sentiment_analysis",
+            name="Sentiment Analyzer",
+            description="Analyzes the sentiment of input text (positive, negative, neutral)",
+            category="text_analysis",
+            input_schema={"text": "string (required)"},
+            output_schema={
+                "sentiment": "string (positive|negative|neutral)",
+                "confidence": "float (0.0-1.0)",
+                "positive_indicators": "integer",
+                "negative_indicators": "integer"
+            },
+            example_input={"text": "I love this amazing product!"},
+            example_output={
+                "sentiment": "positive",
+                "confidence": 0.7,
+                "positive_indicators": 2,
+                "negative_indicators": 0
+            }
+        ),
+        ModelInfo(
+            id="keyword_extraction",
+            name="Keyword Extractor",
+            description="Extracts important keywords from text with frequency analysis",
+            category="text_analysis",
+            input_schema={"text": "string (required)"},
+            output_schema={
+                "keywords": "array of {word: string, frequency: integer}",
+                "total_words": "integer",
+                "unique_words": "integer"
+            },
+            example_input={"text": "Python programming is great for data analysis and machine learning"},
+            example_output={
+                "keywords": [{"word": "python", "frequency": 1}, {"word": "programming", "frequency": 1}],
+                "total_words": 10,
+                "unique_words": 9
+            }
+        ),
+        ModelInfo(
+            id="json_formatter",
+            name="JSON Formatter",
+            description="Formats and validates JSON data with proper indentation",
+            category="data_processing",
+            input_schema={"data": "string or object (required)"},
+            output_schema={
+                "formatted_json": "string",
+                "is_valid": "boolean",
+                "size_bytes": "integer"
+            },
+            example_input={"data": '{"name":"John","age":30}'},
+            example_output={
+                "formatted_json": "{\n  \"age\": 30,\n  \"name\": \"John\"\n}",
+                "is_valid": True,
+                "size_bytes": 32
+            }
+        ),
+        ModelInfo(
+            id="csv_analyzer",
+            name="CSV Analyzer",
+            description="Analyzes CSV data structure and provides statistics",
+            category="data_processing",
+            input_schema={"csv_data": "string (required)"},
+            output_schema={
+                "total_rows": "integer",
+                "total_columns": "integer",
+                "headers": "array of strings",
+                "sample_data": "array of arrays",
+                "column_stats": "object"
+            },
+            example_input={"csv_data": "name,age,city\nJohn,30,NYC\nJane,25,LA"},
+            example_output={
+                "total_rows": 2,
+                "total_columns": 3,
+                "headers": ["name", "age", "city"],
+                "sample_data": [["John", "30", "NYC"]],
+                "column_stats": {"name": {"non_empty_count": 2, "empty_count": 0}}
+            }
+        ),
+        ModelInfo(
+            id="code_formatter",
+            name="Code Formatter",
+            description="Formats code with proper indentation and structure",
+            category="code_utilities",
+            input_schema={"code": "string (required)", "language": "string (optional, default: python)"},
+            output_schema={
+                "formatted_code": "string",
+                "language": "string",
+                "original_lines": "integer",
+                "formatted_lines": "integer"
+            },
+            example_input={"code": "def hello():\nprint('world')", "language": "python"},
+            example_output={
+                "formatted_code": "def hello():\n    print('world')",
+                "language": "python",
+                "original_lines": 2,
+                "formatted_lines": 2
+            }
+        ),
+        ModelInfo(
+            id="code_validator",
+            name="Code Validator",
+            description="Validates code syntax and checks for common issues",
+            category="code_utilities",
+            input_schema={"code": "string (required)", "language": "string (optional, default: python)"},
+            output_schema={
+                "is_valid": "boolean",
+                "syntax_valid": "boolean",
+                "issues": "array of strings",
+                "language": "string",
+                "lines_checked": "integer"
+            },
+            example_input={"code": "def hello()\nprint('world')", "language": "python"},
+            example_output={
+                "is_valid": False,
+                "syntax_valid": False,
+                "issues": ["Syntax Error: invalid syntax"],
+                "language": "python",
+                "lines_checked": 2
+            }
+        ),
+        ModelInfo(
+            id="math_calculator",
+            name="Math Calculator",
+            description="Evaluates mathematical expressions safely",
+            category="mathematics",
+            input_schema={"expression": "string (required)"},
+            output_schema={
+                "result": "number or null",
+                "expression": "string",
+                "is_valid": "boolean",
+                "error": "string (optional)"
+            },
+            example_input={"expression": "2 + 3 * 4"},
+            example_output={
+                "result": 14,
+                "expression": "2 + 3 * 4",
+                "is_valid": True
+            }
+        ),
+        ModelInfo(
+            id="statistics_analyzer",
+            name="Statistics Analyzer",
+            description="Calculates statistical measures for numerical data",
+            category="mathematics",
+            input_schema={"numbers": "array of numbers (required)"},
+            output_schema={
+                "count": "integer",
+                "sum": "number",
+                "mean": "number",
+                "median": "number",
+                "min": "number",
+                "max": "number",
+                "range": "number",
+                "std_dev": "number",
+                "variance": "number"
+            },
+            example_input={"numbers": [1, 2, 3, 4, 5]},
+            example_output={
+                "count": 5,
+                "sum": 15,
+                "mean": 3.0,
+                "median": 3,
+                "min": 1,
+                "max": 5,
+                "range": 4,
+                "std_dev": 1.58,
+                "variance": 2.5
+            }
+        )
+    ]
+    
+    return ModelsResponse(models=models, total_count=len(models))
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     print("Starting MCP Development Server...")
-    uvicorn.run(app, host="127.0.0.1", port=8000) 
+    uvicorn.run(app, host="127.0.0.1", port=8000)

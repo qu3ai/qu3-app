@@ -253,6 +253,7 @@ def run_inference(
     server_url: str = typer.Option(
         DEFAULT_SERVER_URL, help="URL of the target MCP server."
     ),
+    format_output: str = typer.Option("default", "--format", help="Output format: default, json, plain, table"),
 ):
     """
     Connects to an MCP server, sends a PQC-signed inference request,
@@ -301,36 +302,79 @@ def run_inference(
             typer.echo("Client disconnected.")
 
     if response:
-        typer.echo("\n--- Received Response ---")
-        fg_color = typer.colors.GREEN if response.status == 'success' else typer.colors.RED
-        if response.error_message and "Attestation verification FAILED" in response.error_message:
-            fg_color = typer.colors.YELLOW
+        # Format-aware output
+        if format_output.lower() == "json":
+            # Pure JSON output
+            output_json = {
+                "status": response.status,
+                "output_data": response.output_data,
+                "error_message": response.error_message,
+                "attestation_data": response.attestation_data,
+                "attestation_verified": response.attestation_signature is not None,
+                "audit_hash": response.audit_hash
+            }
+            typer.echo(json.dumps(output_json, indent=2))
+        elif format_output.lower() == "plain":
+            # Plain text output (just the result)
+            if response.status == 'success' and response.output_data is not None:
+                if isinstance(response.output_data, dict):
+                    # For dict output, show key-value pairs
+                    for key, value in response.output_data.items():
+                        typer.echo(f"{key}: {value}")
+                else:
+                    typer.echo(str(response.output_data))
+            else:
+                typer.echo(f"Error: {response.error_message or 'Unknown error'}")
+        elif format_output.lower() == "table":
+            # Table format for structured data
+            if response.status == 'success' and response.output_data is not None:
+                if isinstance(response.output_data, dict):
+                    typer.echo("\n📊 Results:")
+                    typer.echo("=" * 40)
+                    for key, value in response.output_data.items():
+                        typer.echo(f"{key:<20} | {value}")
+                    typer.echo("=" * 40)
+                else:
+                    typer.echo(f"Result: {response.output_data}")
+            else:
+                typer.secho(f"❌ Error: {response.error_message or 'Unknown error'}", fg=typer.colors.RED)
+        else:
+            # Default format (original detailed output)
+            typer.echo("\n--- Received Response ---")
+            fg_color = typer.colors.GREEN if response.status == 'success' else typer.colors.RED
+            if response.error_message and "Attestation verification FAILED" in response.error_message:
+                fg_color = typer.colors.YELLOW
 
-        typer.secho(f"Status: {response.status}", fg=fg_color)
+            typer.secho(f"Status: {response.status}", fg=fg_color)
 
-        if response.output_data is not None:
-            try:
-                typer.echo(f"Output: {json.dumps(response.output_data, indent=2)}")
-            except TypeError:
-                 typer.echo(f"Output (raw): {response.output_data}")
-        if response.error_message:
-            error_color = typer.colors.RED if fg_color != typer.colors.YELLOW else typer.colors.YELLOW
-            typer.secho(f"Error Message: {response.error_message}", fg=error_color)
-        if response.attestation_data:
-            typer.echo(f"Attestation Data: {response.attestation_data}")
-        if response.attestation_signature:
-            sig_hex = response.attestation_signature.hex()
-            verification_failed = fg_color == typer.colors.YELLOW
-            status = "(Verification FAILED)" if verification_failed else "(Verification OK)"
-            sig_color = typer.colors.RED if verification_failed else typer.colors.GREEN
-            typer.echo(f"Attestation Signature: {sig_hex[:20]}... {status}", color=sig_color)
-        if response.audit_hash:
-            typer.echo(f"Audit Hash: {response.audit_hash}")
+            if response.output_data is not None:
+                try:
+                    typer.echo(f"Output: {json.dumps(response.output_data, indent=2)}")
+                except TypeError:
+                     typer.echo(f"Output (raw): {response.output_data}")
+            if response.error_message:
+                error_color = typer.colors.RED if fg_color != typer.colors.YELLOW else typer.colors.YELLOW
+                typer.secho(f"Error Message: {response.error_message}", fg=error_color)
+            if response.attestation_data:
+                typer.echo(f"Attestation Data: {response.attestation_data}")
+            if response.attestation_signature:
+                sig_hex = response.attestation_signature.hex()
+                verification_failed = fg_color == typer.colors.YELLOW
+                status = "(Verification FAILED)" if verification_failed else "(Verification OK)"
+                sig_color = typer.colors.RED if verification_failed else typer.colors.GREEN
+                typer.echo(f"Attestation Signature: {sig_hex[:20]}... {status}", color=sig_color)
+            if response.audit_hash:
+                typer.echo(f"Audit Hash: {response.audit_hash}")
     else:
-        typer.secho("No response object available to display (an error likely occurred during the request).", fg=typer.colors.RED)
+        if format_output.lower() == "json":
+            typer.echo(json.dumps({"status": "error", "error_message": "No response received"}, indent=2))
+        elif format_output.lower() == "plain":
+            typer.echo("Error: No response received")
+        else:
+            typer.secho("No response object available to display (an error likely occurred during the request).", fg=typer.colors.RED)
 
-
-    typer.echo("\n--- Inference Complete ---")
+    if format_output.lower() == "default":
+        typer.echo("\n--- Inference Complete ---")
 
 
 @app.command()
@@ -991,6 +1035,621 @@ def benchmark(
         
     except Exception as e:
         typer.secho(f"❌ Benchmark failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command("batch-inference")
+def batch_inference(
+    model_id: str = typer.Argument(..., help="The ID of the model to run."),
+    input_file: Path = typer.Option(
+        None, "--input-file", "-i", 
+        help="Input file (JSON, JSONL, CSV, or TXT). Use '-' for stdin.",
+        exists=True, file_okay=True, dir_okay=False, readable=True
+    ),
+    input_data: Optional[str] = typer.Option(
+        None, "--input-data", 
+        help="Direct input data as JSON string (alternative to --input-file)"
+    ),
+    output_file: Optional[Path] = typer.Option(
+        None, "--output-file", "-o",
+        help="Output file to save results (default: stdout)"
+    ),
+    format_output: str = typer.Option("json", "--format", help="Output format: json, csv, plain"),
+    server_url: Optional[str] = typer.Option(None, "--server-url", help="MCP server URL (overrides config)"),
+    max_workers: int = typer.Option(1, "--workers", help="Number of parallel workers (1-10)"),
+    continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Continue processing on individual errors")
+):
+    """Process multiple inputs through a model in batch mode."""
+    if not input_file and not input_data:
+        typer.secho("❌ Either --input-file or --input-data must be provided", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    if input_file and input_data:
+        typer.secho("❌ Cannot specify both --input-file and --input-data", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    if max_workers < 1 or max_workers > 10:
+        typer.secho("❌ Workers must be between 1 and 10", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    resolved_server_url = server_url or get_server_url()
+    if not resolved_server_url:
+        typer.secho("❌ Server URL not configured", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    typer.echo(f"🚀 Starting batch inference with model '{model_id}'")
+    typer.echo(f"📊 Server: {resolved_server_url}")
+    typer.echo(f"⚡ Workers: {max_workers}")
+    
+    # Load input data
+    inputs = []
+    try:
+        if input_data:
+            # Direct input data
+            try:
+                parsed_data = json.loads(input_data)
+                if isinstance(parsed_data, list):
+                    inputs = parsed_data
+                else:
+                    inputs = [parsed_data]
+            except json.JSONDecodeError:
+                typer.secho("❌ Invalid JSON in --input-data", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+        else:
+            # File input
+            if str(input_file) == "-":
+                # Read from stdin
+                import sys
+                content = sys.stdin.read()
+            else:
+                content = input_file.read_text(encoding='utf-8')
+            
+            # Determine file format and parse
+            if input_file.suffix.lower() == '.jsonl':
+                # JSON Lines format
+                for line_num, line in enumerate(content.strip().split('\n'), 1):
+                    if line.strip():
+                        try:
+                            inputs.append(json.loads(line))
+                        except json.JSONDecodeError as e:
+                            typer.secho(f"❌ Invalid JSON on line {line_num}: {e}", fg=typer.colors.RED)
+                            if not continue_on_error:
+                                raise typer.Exit(code=1)
+            elif input_file.suffix.lower() == '.json':
+                # Regular JSON format
+                try:
+                    parsed_data = json.loads(content)
+                    if isinstance(parsed_data, list):
+                        inputs = parsed_data
+                    else:
+                        inputs = [parsed_data]
+                except json.JSONDecodeError as e:
+                    typer.secho(f"❌ Invalid JSON file: {e}", fg=typer.colors.RED)
+                    raise typer.Exit(code=1)
+            elif input_file.suffix.lower() == '.csv':
+                # CSV format - convert each row to dict
+                import csv
+                from io import StringIO
+                csv_reader = csv.DictReader(StringIO(content))
+                inputs = list(csv_reader)
+            else:
+                # Plain text - each line as separate input
+                lines = [line.strip() for line in content.strip().split('\n') if line.strip()]
+                inputs = [{"text": line} for line in lines]
+                
+    except Exception as e:
+        typer.secho(f"❌ Failed to load input data: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    if not inputs:
+        typer.secho("⚠️  No input data found", fg=typer.colors.YELLOW)
+        return
+    
+    typer.echo(f"📝 Processing {len(inputs)} inputs...")
+    
+    # Initialize client
+    config = load_config()
+    client_state = None
+    results = []
+    
+    try:
+        client_state = initialize_client(config, resolved_server_url)
+        if not client_state:
+            raise typer.Exit(code=1)
+        
+        client = client_state["client"]
+        
+        if not client.connect(client_state["server_url"]):
+            typer.secho("Failed to connect to the server (KEM handshake failed?).", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        
+        # Process inputs with progress tracking
+        successful = 0
+        failed = 0
+        
+        for i, input_item in enumerate(inputs, 1):
+            try:
+                # Show progress
+                if len(inputs) > 1:
+                    progress = f"[{i}/{len(inputs)}]"
+                    typer.echo(f"{progress} Processing input {i}...", nl=False)
+                
+                request = MCPRequest(
+                    target_server_url=client_state["server_url"],
+                    model_id=model_id,
+                    input_data=input_item,
+                )
+                
+                response = client.send_request(request)
+                
+                if response and response.status == 'success':
+                    results.append({
+                        "input_index": i,
+                        "input_data": input_item,
+                        "status": "success",
+                        "output_data": response.output_data,
+                        "attestation_verified": response.attestation_signature is not None
+                    })
+                    successful += 1
+                    if len(inputs) > 1:
+                        typer.secho(" ✅", fg=typer.colors.GREEN)
+                else:
+                    error_msg = response.error_message if response else "No response received"
+                    results.append({
+                        "input_index": i,
+                        "input_data": input_item,
+                        "status": "error",
+                        "error": error_msg
+                    })
+                    failed += 1
+                    if len(inputs) > 1:
+                        typer.secho(f" ❌ {error_msg}", fg=typer.colors.RED)
+                    
+                    if not continue_on_error:
+                        typer.secho(f"❌ Stopping on error: {error_msg}", fg=typer.colors.RED)
+                        break
+                        
+            except Exception as e:
+                error_msg = str(e)
+                results.append({
+                    "input_index": i,
+                    "input_data": input_item,
+                    "status": "error",
+                    "error": error_msg
+                })
+                failed += 1
+                if len(inputs) > 1:
+                    typer.secho(f" ❌ {error_msg}", fg=typer.colors.RED)
+                
+                if not continue_on_error:
+                    typer.secho(f"❌ Stopping on error: {error_msg}", fg=typer.colors.RED)
+                    break
+        
+        # Output results
+        if output_file:
+            output_content = ""
+            if format_output.lower() == "json":
+                output_content = json.dumps(results, indent=2)
+            elif format_output.lower() == "csv":
+                import csv
+                from io import StringIO
+                output_buffer = StringIO()
+                if results:
+                    fieldnames = ["input_index", "status", "input_data", "output_data", "error"]
+                    writer = csv.DictWriter(output_buffer, fieldnames=fieldnames)
+                    writer.writeheader()
+                    for result in results:
+                        row = {
+                            "input_index": result["input_index"],
+                            "status": result["status"],
+                            "input_data": json.dumps(result["input_data"]),
+                            "output_data": json.dumps(result.get("output_data", "")),
+                            "error": result.get("error", "")
+                        }
+                        writer.writerow(row)
+                output_content = output_buffer.getvalue()
+            else:  # plain format
+                for result in results:
+                    output_content += f"Input {result['input_index']}: {result['status']}\n"
+                    if result['status'] == 'success':
+                        output_content += f"  Output: {json.dumps(result['output_data'])}\n"
+                    else:
+                        output_content += f"  Error: {result.get('error', 'Unknown error')}\n"
+                    output_content += "\n"
+            
+            output_file.write_text(output_content, encoding='utf-8')
+            typer.secho(f"📄 Results saved to {output_file}", fg=typer.colors.GREEN)
+        else:
+            # Output to stdout
+            if format_output.lower() == "json":
+                typer.echo(json.dumps(results, indent=2))
+            else:
+                typer.echo("\n📊 Batch Processing Results:")
+                typer.echo("=" * 50)
+                for result in results:
+                    status_color = typer.colors.GREEN if result['status'] == 'success' else typer.colors.RED
+                    typer.secho(f"Input {result['input_index']}: {result['status']}", fg=status_color)
+                    if result['status'] == 'success':
+                        typer.echo(f"  Output: {json.dumps(result['output_data'])}")
+                    else:
+                        typer.echo(f"  Error: {result.get('error', 'Unknown error')}")
+                    typer.echo()
+        
+        # Summary
+        typer.echo(f"\n📈 Batch Processing Summary:")
+        typer.secho(f"  ✅ Successful: {successful}", fg=typer.colors.GREEN)
+        if failed > 0:
+            typer.secho(f"  ❌ Failed: {failed}", fg=typer.colors.RED)
+        typer.secho(f"  📊 Total: {len(inputs)}", fg=typer.colors.BLUE)
+        
+        if failed > 0 and not continue_on_error:
+            raise typer.Exit(code=1)
+            
+    except (RuntimeError, typer.Exit) as e:
+        if isinstance(e, typer.Exit):
+            raise e
+        typer.secho(f"Fatal Client Error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"An unexpected error occurred: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    finally:
+        if client_state and client_state.get("client"):
+            client_state["client"].disconnect()
+
+
+@app.command("interactive")
+def interactive_mode(
+    server_url: Optional[str] = typer.Option(None, "--server-url", help="MCP server URL (overrides config)")
+):
+    """Interactive mode for guided model usage and parameter selection."""
+    resolved_server_url = server_url or get_server_url()
+    
+    if not resolved_server_url:
+        typer.secho("❌ Server URL not configured", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    typer.secho("🎯 Welcome to QU3 Interactive Mode!", fg=typer.colors.BLUE, bold=True)
+    typer.echo("This mode will guide you through using the available models.\n")
+    
+    # Fetch available models
+    try:
+        import requests
+        response = requests.get(f"{resolved_server_url.rstrip('/')}/models", timeout=10)
+        
+        if response.status_code != 200:
+            typer.secho(f"❌ Failed to fetch models: HTTP {response.status_code}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+            
+        models_data = response.json()
+        models = models_data.get("models", [])
+        
+        if not models:
+            typer.secho("⚠️  No models found on the server", fg=typer.colors.YELLOW)
+            return
+            
+    except requests.exceptions.ConnectionError:
+        typer.secho(f"❌ Cannot connect to server at {resolved_server_url}", fg=typer.colors.RED)
+        typer.secho("💡 Make sure the server is running", fg=typer.colors.BLUE)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"❌ Failed to fetch models: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    # Group models by category
+    categories = {}
+    for model in models:
+        cat = model.get("category", "uncategorized")
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(model)
+    
+    while True:
+        try:
+            # Show categories
+            typer.echo("\n📂 Available Categories:")
+            cat_list = list(categories.keys())
+            for i, cat_name in enumerate(cat_list, 1):
+                model_count = len(categories[cat_name])
+                typer.echo(f"  {i}. {cat_name.replace('_', ' ').title()} ({model_count} models)")
+            
+            typer.echo(f"  {len(cat_list) + 1}. Show all models")
+            typer.echo(f"  {len(cat_list) + 2}. Exit")
+            
+            # Get category selection
+            try:
+                choice = typer.prompt("\n🔍 Select a category (number)")
+                choice_num = int(choice)
+                
+                if choice_num == len(cat_list) + 2:  # Exit
+                    typer.secho("👋 Goodbye!", fg=typer.colors.GREEN)
+                    break
+                elif choice_num == len(cat_list) + 1:  # Show all models
+                    selected_models = models
+                    typer.echo("\n📋 All Available Models:")
+                elif 1 <= choice_num <= len(cat_list):
+                    selected_cat = cat_list[choice_num - 1]
+                    selected_models = categories[selected_cat]
+                    typer.echo(f"\n📋 Models in {selected_cat.replace('_', ' ').title()}:")
+                else:
+                    typer.secho("❌ Invalid selection", fg=typer.colors.RED)
+                    continue
+                    
+            except (ValueError, typer.Abort):
+                typer.secho("❌ Invalid input", fg=typer.colors.RED)
+                continue
+            
+            # Show models in selected category
+            for i, model in enumerate(selected_models, 1):
+                typer.secho(f"  {i}. {model['name']}", fg=typer.colors.GREEN, bold=True)
+                typer.echo(f"     ID: {model['id']}")
+                typer.echo(f"     Description: {model['description']}")
+            
+            typer.echo(f"  {len(selected_models) + 1}. Back to categories")
+            
+            # Get model selection
+            try:
+                model_choice = typer.prompt("\n🤖 Select a model (number)")
+                model_choice_num = int(model_choice)
+                
+                if model_choice_num == len(selected_models) + 1:  # Back
+                    continue
+                elif 1 <= model_choice_num <= len(selected_models):
+                    selected_model = selected_models[model_choice_num - 1]
+                else:
+                    typer.secho("❌ Invalid selection", fg=typer.colors.RED)
+                    continue
+                    
+            except (ValueError, typer.Abort):
+                typer.secho("❌ Invalid input", fg=typer.colors.RED)
+                continue
+            
+            # Show model details and get input
+            typer.echo(f"\n🎯 Selected Model: {selected_model['name']}")
+            typer.echo(f"📝 Description: {selected_model['description']}")
+            typer.echo(f"🔧 Required Input: {json.dumps(selected_model['input_schema'], indent=2)}")
+            typer.echo(f"📤 Example Input: {json.dumps(selected_model['example_input'], indent=2)}")
+            typer.echo(f"📥 Example Output: {json.dumps(selected_model['example_output'], indent=2)}")
+            
+            # Input options
+            typer.echo("\n📝 Input Options:")
+            typer.echo("  1. Use example input")
+            typer.echo("  2. Enter custom JSON input")
+            typer.echo("  3. Guided input (step-by-step)")
+            typer.echo("  4. Back to model selection")
+            
+            try:
+                input_choice = typer.prompt("🔤 Select input method (number)")
+                input_choice_num = int(input_choice)
+                
+                if input_choice_num == 4:  # Back
+                    continue
+                elif input_choice_num == 1:  # Use example
+                    user_input = selected_model['example_input']
+                elif input_choice_num == 2:  # Custom JSON
+                    json_input = typer.prompt("📝 Enter JSON input")
+                    try:
+                        user_input = json.loads(json_input)
+                    except json.JSONDecodeError as e:
+                        typer.secho(f"❌ Invalid JSON: {e}", fg=typer.colors.RED)
+                        continue
+                elif input_choice_num == 3:  # Guided input
+                    user_input = {}
+                    typer.echo("\n🔧 Guided Input Creation:")
+                    
+                    for field, field_type in selected_model['input_schema'].items():
+                        if "required" in field_type.lower():
+                            required_marker = " (required)"
+                            is_required = True
+                        else:
+                            required_marker = " (optional)"
+                            is_required = False
+                        
+                        field_prompt = f"Enter {field}{required_marker}"
+                        
+                        if "string" in field_type.lower():
+                            value = typer.prompt(field_prompt)
+                            user_input[field] = value
+                        elif "number" in field_type.lower() or "integer" in field_type.lower():
+                            try:
+                                if "integer" in field_type.lower():
+                                    value = int(typer.prompt(field_prompt))
+                                else:
+                                    value = float(typer.prompt(field_prompt))
+                                user_input[field] = value
+                            except ValueError:
+                                typer.secho(f"��� Invalid number for {field}", fg=typer.colors.RED)
+                                if is_required:
+                                    continue
+                        elif "array" in field_type.lower():
+                            array_input = typer.prompt(f"{field_prompt} (comma-separated)")
+                            if "number" in field_type.lower():
+                                try:
+                                    user_input[field] = [float(x.strip()) for x in array_input.split(',')]
+                                except ValueError:
+                                    typer.secho(f"❌ Invalid numbers for {field}", fg=typer.colors.RED)
+                                    if is_required:
+                                        continue
+                            else:
+                                user_input[field] = [x.strip() for x in array_input.split(',')]
+                        else:
+                            # Generic input
+                            value = typer.prompt(field_prompt)
+                            user_input[field] = value
+                else:
+                    typer.secho("❌ Invalid selection", fg=typer.colors.RED)
+                    continue
+                    
+            except (ValueError, typer.Abort):
+                typer.secho("❌ Invalid input", fg=typer.colors.RED)
+                continue
+            
+            # Confirm and execute
+            typer.echo(f"\n🔍 Review Your Request:")
+            typer.echo(f"Model: {selected_model['name']} ({selected_model['id']})")
+            typer.echo(f"Input: {json.dumps(user_input, indent=2)}")
+            
+            if typer.confirm("\n🚀 Execute this request?"):
+                typer.echo("\n⚡ Executing request...")
+                
+                # Initialize client and execute
+                config = load_config()
+                client_state = None
+                
+                try:
+                    client_state = initialize_client(config, resolved_server_url)
+                    if not client_state:
+                        typer.secho("❌ Failed to initialize client", fg=typer.colors.RED)
+                        continue
+                    
+                    client = client_state["client"]
+                    
+                    if not client.connect(client_state["server_url"]):
+                        typer.secho("❌ Failed to connect to server", fg=typer.colors.RED)
+                        continue
+                    
+                    request = MCPRequest(
+                        target_server_url=client_state["server_url"],
+                        model_id=selected_model['id'],
+                        input_data=user_input,
+                    )
+                    
+                    response = client.send_request(request)
+                    
+                    if response and response.status == 'success':
+                        typer.secho("\n✅ Success!", fg=typer.colors.GREEN, bold=True)
+                        typer.echo("📤 Output:")
+                        typer.echo(json.dumps(response.output_data, indent=2))
+                        
+                        if response.attestation_signature:
+                            typer.secho("🔐 Attestation verified", fg=typer.colors.GREEN)
+                    else:
+                        typer.secho("\n❌ Request failed", fg=typer.colors.RED, bold=True)
+                        if response and response.error_message:
+                            typer.echo(f"Error: {response.error_message}")
+                        
+                except Exception as e:
+                    typer.secho(f"❌ Execution error: {e}", fg=typer.colors.RED)
+                finally:
+                    if client_state and client_state.get("client"):
+                        client_state["client"].disconnect()
+            
+            # Ask if user wants to continue
+            if not typer.confirm("\n🔄 Try another model?"):
+                typer.secho("👋 Goodbye!", fg=typer.colors.GREEN)
+                break
+                
+        except typer.Abort:
+            typer.secho("\n👋 Goodbye!", fg=typer.colors.GREEN)
+            break
+        except Exception as e:
+            typer.secho(f"❌ Unexpected error: {e}", fg=typer.colors.RED)
+            if not typer.confirm("🔄 Continue despite error?"):
+                break
+
+
+@app.command("list-models")
+def list_models(
+    server_url: Optional[str] = typer.Option(None, "--server-url", help="MCP server URL (overrides config)"),
+    format_output: str = typer.Option("table", "--format", help="Output format: table, json, plain"),
+    category: Optional[str] = typer.Option(None, "--category", help="Filter by category")
+):
+    """Lists all available models from the MCP server with descriptions and usage examples."""
+    resolved_server_url = server_url or get_server_url()
+    
+    if not resolved_server_url:
+        typer.secho("❌ Server URL not configured", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+        
+    typer.echo(f"🔍 Fetching available models from {resolved_server_url}...")
+    
+    try:
+        import requests
+        response = requests.get(f"{resolved_server_url.rstrip('/')}/models", timeout=10)
+        
+        if response.status_code != 200:
+            typer.secho(f"❌ Failed to fetch models: HTTP {response.status_code}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+            
+        models_data = response.json()
+        models = models_data.get("models", [])
+        
+        if not models:
+            typer.secho("⚠️  No models found on the server", fg=typer.colors.YELLOW)
+            return
+            
+        # Filter by category if specified
+        if category:
+            models = [m for m in models if m.get("category", "").lower() == category.lower()]
+            if not models:
+                typer.secho(f"⚠️  No models found in category '{category}'", fg=typer.colors.YELLOW)
+                return
+        
+        # Display models based on format
+        if format_output.lower() == "json":
+            typer.echo(json.dumps(models_data, indent=2))
+        elif format_output.lower() == "plain":
+            for model in models:
+                typer.echo(f"\n📋 {model['name']} ({model['id']})")
+                typer.echo(f"   Category: {model['category']}")
+                typer.echo(f"   Description: {model['description']}")
+                typer.echo(f"   Input: {json.dumps(model['example_input'])}")
+                typer.echo(f"   Output: {json.dumps(model['example_output'])}")
+        else:  # table format (default)
+            typer.echo(f"\n📊 Available Models ({len(models)} found)")
+            typer.echo("=" * 80)
+            
+            # Group by category
+            categories = {}
+            for model in models:
+                cat = model.get("category", "uncategorized")
+                if cat not in categories:
+                    categories[cat] = []
+                categories[cat].append(model)
+            
+            for cat_name, cat_models in categories.items():
+                typer.secho(f"\n🏷️  {cat_name.upper().replace('_', ' ')}", fg=typer.colors.BLUE, bold=True)
+                typer.echo("-" * 40)
+                
+                for model in cat_models:
+                    typer.secho(f"  • {model['name']}", fg=typer.colors.GREEN, bold=True)
+                    typer.echo(f"    ID: {model['id']}")
+                    typer.echo(f"    Description: {model['description']}")
+                    
+                    # Show input schema in a readable format
+                    input_fields = []
+                    for field, field_type in model.get('input_schema', {}).items():
+                        input_fields.append(f"{field}: {field_type}")
+                    typer.echo(f"    Input: {', '.join(input_fields)}")
+                    
+                    # Show example usage
+                    typer.secho(f"    Example:", fg=typer.colors.CYAN)
+                    typer.echo(f"      Input:  {json.dumps(model['example_input'])}")
+                    typer.echo(f"      Output: {json.dumps(model['example_output'])}")
+                    typer.echo()
+        
+        # Show usage instructions
+        typer.echo("\n💡 Usage Instructions:")
+        typer.echo("   To use a model: python -m src.main run-inference <model_id> '<input_json>'")
+        typer.echo("   Example: python -m src.main run-inference sentiment_analysis '{\"text\": \"I love this!\"}'")
+        
+        if category:
+            typer.echo(f"\n🏷️  Showing models in category: {category}")
+        
+        typer.secho(f"\n✅ Found {len(models)} models", fg=typer.colors.GREEN)
+        
+    except requests.exceptions.ConnectionError:
+        typer.secho(f"❌ Cannot connect to server at {resolved_server_url}", fg=typer.colors.RED)
+        typer.secho("💡 Make sure the server is running", fg=typer.colors.BLUE)
+        raise typer.Exit(code=1)
+    except requests.exceptions.Timeout:
+        typer.secho(f"❌ Connection to {resolved_server_url} timed out", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except json.JSONDecodeError:
+        typer.secho("❌ Invalid JSON response from server", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"❌ Failed to list models: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 
